@@ -21,6 +21,12 @@ This repository contains multiple related projects for ambient clinical document
    ```
 3. Run the apps as needed by following each project’s local instructions.
 
+## Coding Agent Integration Pack
+
+For sharing the medical coding functionality with an older Agent Pod version, see the integration guide:
+
+- [CODING_AGENT_INTEGRATION.md](./CODING_AGENT_INTEGRATION.md)
+
 ## Collaboration Workflow
 
 - Create a feature branch for each task

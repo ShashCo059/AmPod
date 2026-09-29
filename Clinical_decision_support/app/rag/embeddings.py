@@ -1,5 +1,34 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from app.core.config import EMBEDDING_MODEL
+
+
+_model = None
+
+
+def get_embedding_model():
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+
+        _model = SentenceTransformer(EMBEDDING_MODEL)
+    return _model
+
+
+def generate_sentence_embeddings(texts, batch_size):
+    return get_embedding_model().encode(
+        texts,
+        batch_size=batch_size,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+
+
+def generate_tfidf_embeddings(texts):
+    vectorizer = create_vectorizer()
+    return vectorizer, vectorizer.fit_transform(texts)
+
 
 def create_vectorizer():
     """

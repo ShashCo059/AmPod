@@ -7,19 +7,28 @@ client = chromadb.PersistentClient(
 )
 
 collection = client.get_or_create_collection(
-    name="medical_knowledge"
+    name="medical_knowledge",
+    metadata={"hnsw:space": "cosine"},
 )
 
 
-def store_chunks(chunks, embeddings):
-    """
-    Store document chunks and embeddings in ChromaDB.
-    """
-
-    ids = [str(i) for i in range(len(chunks))]
-
-    collection.upsert(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings.tolist()
+def reset_collection():
+    global collection
+    client.delete_collection("medical_knowledge")
+    collection = client.get_or_create_collection(
+        name="medical_knowledge",
+        metadata={"hnsw:space": "cosine"},
     )
+
+
+def store_chunks(chunks, embeddings, batch_size=250):
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start:start + batch_size]
+        batch_embeddings = embeddings[start:start + batch_size]
+        collection.upsert(
+            ids=[f"{item['metadata']['source']}-p{item['metadata']['page']}-c{start + offset}"
+                 for offset, item in enumerate(batch)],
+            documents=[item["text"] for item in batch],
+            embeddings=batch_embeddings.tolist(),
+            metadatas=[item["metadata"] for item in batch],
+        )

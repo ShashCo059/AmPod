@@ -188,16 +188,16 @@ Invoke-RestMethod `
 
 ## Knowledge Base
 
-The source knowledge base is `knowledge_base/diseases.pdf`.
+The source knowledge base is `knowledge_base/knowledge_base_harrison.docx`.
 
 `app/scripts/build_kb.py` performs these steps:
 
-1. Extract text from the PDF.
-2. Split text into overlapping chunks.
-3. Fit a scikit-learn TF-IDF vectorizer.
-4. Store chunks and embeddings in ChromaDB.
-5. Save the vectorizer to `chroma_db/tfidf_vectorizer.pkl`.
-6. Save the sparse matrix to `chroma_db/tfidf_matrix.npz`.
+1. Extract Word paragraphs and tables while preserving heading context.
+2. Split each document block into overlapping clinical text chunks with source metadata.
+3. Generate normalized Sentence Transformer embeddings in batches.
+4. Replace the current Chroma collection using batched upserts.
+5. Retrieve the nearest candidate chunks directly from Chroma.
+6. Deduplicate candidates and bound the cited context sent to the LLM.
 
 Run it after changing the PDF or when generated artifacts are missing:
 
@@ -206,7 +206,22 @@ cd "D:\Agent pod\Clinical_decision_support"
 & "D:\Agent pod\venv\Scripts\python.exe" -m app.scripts.build_kb
 ```
 
-The retriever uses the persisted TF-IDF matrix for similarity scoring and ChromaDB for the stored document chunks. `chroma_db` is generated runtime data and should be treated as an application artifact.
+The retriever uses Chroma's cosine vector search and adds source filename, document block, and heading citations to the CDS context. Word documents do not reliably expose printed page numbers through `python-docx`, so citations use block and heading metadata. `chroma_db` is generated runtime data and should be treated as an application artifact. The first build downloads the configured Sentence Transformer model.
+
+For a large PDF, these optional `.env` settings control resource usage:
+
+```dotenv
+EMBEDDING_BACKEND=auto
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EMBEDDING_BATCH_SIZE=64
+RETRIEVAL_CANDIDATES=20
+RETRIEVAL_RESULTS=5
+MAX_CONTEXT_CHARS=12000
+```
+
+`EMBEDDING_BACKEND=auto` uses Sentence Transformers when the model is available locally or can be downloaded. If model download fails, it automatically builds a sparse TF-IDF index instead. Set `EMBEDDING_BACKEND=tfidf` to force fully offline indexing, or `EMBEDDING_BACKEND=sentence_transformer` to fail instead of falling back.
+
+If the Word file contains images of scanned pages, OCR them before indexing; `python-docx` extracts document text but does not OCR embedded images.
 
 ## File Guide
 
@@ -291,6 +306,27 @@ When the user selects CDS and presses **Generate Note**, Streamlit passes the ex
 ### Saving a record
 
 After the optional CDS request succeeds, Streamlit builds a record dictionary containing patient metadata, transcript, summary, retrieved guidelines, recommendations, and analysis version. It inserts the record at the beginning of `st.session_state.records`, writes `clinical_records.json`, and opens the review page.
+
+### HCC / medical coding workflow
+
+The coding workspace creates machine-suggested diagnosis and procedure codes from the clinical insights detected in an encounter transcript. In this repository, “HCC coding” currently means ICD-10 diagnosis matching and CPT/HCPCS procedure matching. It does not calculate CMS-HCC categories, RAF scores, payment models, or final billable coding decisions.
+
+The flow is:
+
+1. `get_detected_insights()` in `frontend/streamlit_app.py` scans the transcript for supported diagnoses, symptoms, risk factors, tests, and procedures. Examples include hypertension, diabetes, fever, CBC, A1C, chest X-ray, CT scan, MRI, and ultrasound.
+2. On the **Codes** page, the clinician selects an encounter and chooses **Generate Code Suggestions**.
+3. `get_code_suggestions()` removes duplicates and sends each insight to `classify_medical_item()` in `code_matcher.py`.
+4. Diagnosis, symptom, disease, and injury terms are routed to ICD-10. Test, imaging, therapy, and other procedure/service terms are routed to CPT/HCPCS. The UI also has a procedure-term fallback for items that the classifier cannot categorize.
+5. `get_medical_codes()` loads the local ICD-10 and CPT/HCPCS datasets, checks exact and phrase matches first, and then uses RapidFuzz `WRatio` fuzzy matching. The Streamlit workflow uses an 80% similarity threshold and returns one strongest match per item by default.
+6. Common procedures and diagnoses have deterministic fallback mappings when a suitable dataset entry is unavailable, such as CBC (`85025`), A1C (`83036`), chest X-ray (`71045`/`71046`), hypertension (`I10`), and diabetes (`E11.9`).
+7. Results are displayed separately in the **ICD-10 Diagnosis Codes** and **CPT/HCPCS Procedure Codes** tabs. Each result includes the extracted term, matched description, and code.
+
+The matcher looks for these dataset files relative to `code_matcher.py`:
+
+- `ICD10CM_2022_Codes.json` or another supported ICD-10 JSON filename
+- `CPT_CODES.json`, `structured_cpt_hcpcs_2026.json`, or another supported CPT/HCPCS JSON filename
+
+The coding feature is intentionally conservative: unsupported or ambiguous terms are not forced into a code family, and a fuzzy match is only returned when it meets the threshold. Code suggestions must be reviewed by a qualified coder or clinician before billing, claim submission, or adding them to the legal health record. The current prototype does not persist approved codes back into `clinical_records.json`.
 
 ## Testing
 

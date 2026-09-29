@@ -16,7 +16,7 @@ class AmbientScribeAgent:
                 "Convert this doctor-patient transcript into structured clinical documentation. "
                 "Return only valid JSON with string fields: "
                 '{"soap_note":"", "patient_summary":"", "key_highlights":[], "chief_complaint":"", "hpi":"", '
-                '"past_medical_history":"", "current_medications":"", "assessment":"", "plan":""}\n\n'
+                '"past_medical_history":"", "current_medications":"", "objective":"", "assessment":"", "plan":""}\n\n'
                 f"Transcript:\n{transcript}"
             ),
             system_prompt=(

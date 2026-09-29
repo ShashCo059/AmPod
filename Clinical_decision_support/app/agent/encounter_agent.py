@@ -34,6 +34,7 @@ class EncounterAgent:
         context = self.scribe.transcribe(transcript)
         if not context.patient_summary:
             context.patient_summary = context.as_patient_summary()
+        context.soap_note = context.as_soap_note()
         context.metadata["agents_invoked"] = [self.scribe.name]
         return context
 

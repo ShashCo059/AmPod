@@ -3,18 +3,26 @@ from pathlib import Path
 from pypdf import PdfReader
 
 
-def load_pdf(pdf_path):
+def load_pdf_pages(pdf_path):
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     reader = PdfReader(str(pdf_path))
-    text_parts = []
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text_parts.append(page_text)
-    return "\n".join(text_parts)
+    pages = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        pages.append({
+            "text": text,
+            "page": page_number,
+            "ocr_required": len(text) < 40,
+        })
+    return pages
+
+
+def load_pdf(pdf_path):
+    """Return extracted PDF text for compatibility with older callers."""
+    return "\n".join(page["text"] for page in load_pdf_pages(pdf_path) if page["text"])
 
 
 def load_all_pdfs(folder_path):

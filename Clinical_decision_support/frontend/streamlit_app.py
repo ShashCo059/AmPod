@@ -1,217 +1,799 @@
-
-import streamlit as st
-import speech_recognition as sr
-import requests
-import json
-import uuid
-import os
-import math
-import re
-from datetime import datetime
 import io
-import pandas as pd
+import json
+import math
+import os
+import re
+import sys
+import uuid
+from datetime import datetime
+from html import escape, unescape
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import altair as alt
-from html import escape
+import pandas as pd
+import requests
+import speech_recognition as sr
+import streamlit as st
+
+from frontend.chargemaster import build_cpt_bill_rows
+
+if st.session_state.get("theme_defaults_version") != "light-default-v3":
+    st.session_state.theme = "Light"
+    st.session_state.theme_defaults_version = "light-default-v3"
+theme_name = st.session_state.get("theme", "Light")
+if theme_name == "Dark":
+    theme_vars = """
+    --bg: #1e1e1e; --surface: #292929; --surface-soft: #242424;
+    --border: #3a3a3a; --border-strong: #4a4a4a; --text: #f5f5f5;
+    --muted: #b8b8b8; --primary: #f59e0b; --primary-hover: #d97706;
+    --success: #86efac; --success-soft: #164e2b; --warning: #fbbf24;
+    --warning-soft: #5b4108; --danger: #fca5a5; --danger-soft: #5c2020;
+    --info: #93c5fd; --info-soft: #1e3a5f; --purple: #d8b4fe;
+    --sidebar-bg: #181818; --sidebar-border: #343434; --sidebar-text: #f5f5f5;
+    --sidebar-muted: #b8b8b8; --sidebar-hover: #3a2a12;
+    """
+    header_background = "rgba(30, 30, 30, .98)"
+else:
+    theme_vars = """
+    --bg: #f4f7f9; --surface: #ffffff; --surface-soft: #f8fafc;
+    --border: #e2e8f0; --border-strong: #cbd5e1; --text: #17212b;
+    --muted: #64748b; --primary: #148277; --primary-hover: #0f6f66;
+    --success: #15803d; --success-soft: #dcfce7; --warning: #b45309;
+    --warning-soft: #fef3c7; --danger: #b91c1c; --danger-soft: #fee2e2;
+    --info: #2563eb; --info-soft: #dbeafe; --purple: #7c3aed;
+    --sidebar-bg: #fcfcfc; --sidebar-border: #e5e7eb; --sidebar-text: #333333;
+    --sidebar-muted: #6b7280; --sidebar-hover: #fff1ef;
+    """
+    header_background = "rgba(244, 247, 249, .96)"
 
 try:
     from frontend.api_client import HealthcareApiClient
 except ModuleNotFoundError:
     from api_client import HealthcareApiClient
 
+try:
+    from cpt_coder import (
+        classify_medical_item,
+        extract_performed_procedures,
+        get_cpt_codes,
+        get_cpt_candidate_sets,
+        is_explicitly_performed,
+    )
+    from icd10_coder import get_icd10_candidate_sets, get_icd10_codes
+except ModuleNotFoundError:
+    try:
+        from cpt_coder import (
+            classify_medical_item,
+            extract_performed_procedures,
+            get_cpt_codes,
+            get_cpt_candidate_sets,
+            is_explicitly_performed,
+        )
+        from icd10_coder import get_icd10_candidate_sets, get_icd10_codes
+    except ModuleNotFoundError:
+        classify_medical_item = None
+        extract_performed_procedures = None
+        get_cpt_candidate_sets = None
+        get_cpt_codes = None
+        get_icd10_candidate_sets = None
+        get_icd10_codes = None
+        is_explicitly_performed = None
+
+
 # ============================================================
-# 1. CONFIGURATION & CLINICAL THEME
+# 1. CONFIGURATION
 # ============================================================
-st.set_page_config(page_title="MScribe | Clinical Scribe", layout="wide", page_icon="MS", menu_items=None)
+st.set_page_config(
+    page_title="Am-Pod | Clinical Scribe",
+    page_icon="AP",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items=None,
+)
 
 DB_FILE = "clinical_records.json"
 ANALYSIS_VERSION = "2"
+CODE_MATCHER_VERSION = "4"
+
 
 # ============================================================
-# CSS - POWER BI STYLE DASHBOARD
+# 2. THEME AND LAYOUT
 # ============================================================
-st.markdown("""
+st.markdown(
+    """
 <style>
-    :root { --bg:#F6F8FA; --surface:#FFFFFF; --surface-secondary:#F8FAFC; --border:#E2E8F0; --border-strong:#CBD5E1; --text-primary:#17212B; --text-secondary:#64748B; --text-muted:#94A3B8; --primary:#0F766E; --primary-hover:#0D9488; --primary-light:#CCFBF1; --success:#15803D; --success-light:#DCFCE7; --warning:#B45309; --warning-light:#FEF3C7; --danger:#B91C1C; --danger-light:#FEE2E2; --info:#2563EB; --info-light:#DBEAFE; --purple:#7C3AED; --purple-light:#EDE9FE; }
-    #MainMenu, header, footer { visibility: hidden; height: 0 !important; }
-    .stApp { background: var(--bg) !important; font-family: Inter, system-ui, -apple-system, sans-serif; }
-    .block-container { max-width: 100%; padding: 0.75rem 1.75rem 0.35rem !important; }
-    .stMarkdown, .stText, label, h1, h2, h3, p { color: var(--text-primary) !important; }
-    .stButton>button { background-color: var(--primary) !important; border: 1px solid var(--primary) !important; border-radius: 6px !important; min-height: 2rem !important; padding: 0.25rem 0.75rem !important; font-weight: 600 !important; }
-    .stButton>button p, .stButton>button span { color: white !important; -webkit-text-fill-color: white !important; }
-    .stButton>button:hover { background-color: var(--primary-hover) !important; border-color: var(--primary-hover) !important; }
+:root {
+    {theme_vars}
+}
+#MainMenu, footer { visibility: hidden; }
+html { font-size: 15px; }
+.stApp {
+    background: var(--bg);
+    color: var(--text);
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    transition: none !important;
+}
+header[data-testid="stHeader"] {
+    height: 3.25rem;
+    background: {header_background};
+    border-bottom: 1px solid var(--border);
+    z-index: 1000;
+}
+button[data-testid="stSidebarCollapsedControl"],
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="collapsedControl"] button { z-index: 1100; }
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {
+    color: var(--primary) !important;
+    background: var(--surface) !important;
+    border: 1px solid var(--primary) !important;
+    border-radius: .45rem !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] button,
+[data-testid="stSidebarCollapseButton"] button {
+    color: #4a4a4a !important;
+    background: #f1f3f5 !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: .45rem !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] button:hover,
+[data-testid="stSidebarCollapsedControl"] button:hover,
+[data-testid="stSidebarCollapseButton"] button:hover {
+    color: #333333 !important;
+    background: #e5e7eb !important;
+}
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapseButton"] svg {
+    fill: #4a4a4a !important;
+    color: #4a4a4a !important;
+    stroke: #4a4a4a !important;
+}
+[data-testid="stAppViewContainer"] > .main { padding-top: 0; }
+.block-container { max-width: 1440px; padding: 4.5rem 2rem 1.5rem !important; }
+[data-testid="stVerticalBlock"] { gap: .7rem; }
+[data-testid="stHorizontalBlock"] { gap: .75rem; }
+[data-testid="stElementContainer"] { margin-bottom: 0; }
+hr { margin: .25rem 0 .65rem !important; border-color: var(--border) !important; }
 
-    /* Input fields */
-    div[data-testid="stTextInput"] div[data-baseweb="input"],
-    div[data-testid="stSelectbox"] div[data-baseweb="select"],
-    div[data-testid="stTextArea"] div[data-baseweb="base-input"],
-    div[data-testid="stDateInput"] div[data-baseweb="input"] {
-        background-color: var(--surface) !important;
-        border: 1px solid var(--border) !important;
-        border-radius: 5px !important;
-    }
-    div[data-testid="stTextInput"] div[data-baseweb="base-input"],
-    div[data-testid="stTextArea"] div[data-baseweb="base-input"],
-    div[data-testid="stDateInput"] div[data-baseweb="base-input"] { background-color: transparent !important; }
+/* Sidebar */
+[data-testid="stSidebar"] { background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); }
+[data-testid="stSidebar"] > div:first-child { padding: 1rem .85rem 1.25rem; }
+[data-testid="stSidebar"] * { color: var(--sidebar-text) !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: .3rem; }
+[data-testid="stSidebar"] .stButton > button {
+    min-height: 2.45rem; justify-content: flex-start; background: transparent !important;
+    border: 1px solid transparent !important; box-shadow: none !important; pointer-events: auto !important; position: relative; z-index: 10;
+}
+[data-testid="stSidebar"] .stSelectbox,
+[data-testid="stSidebar"] .stButton { pointer-events: auto !important; position: relative; z-index: 10; }
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: var(--sidebar-hover) !important; border-color: var(--primary) !important;
+}
+.stSidebar [data-baseweb="select"],
+[data-testid="stSidebar"] [data-baseweb="select"] {
+    background: var(--surface) !important;
+    border: 1px solid var(--sidebar-border) !important;
+    border-radius: .45rem !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="select"] [role="combobox"] {
+    background: var(--surface) !important;
+    color: var(--sidebar-text) !important;
+    border: 0 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="select"] input {
+    color: var(--sidebar-text) !important;
+    -webkit-text-fill-color: var(--sidebar-text) !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] svg {
+    fill: var(--sidebar-text) !important;
+    color: var(--sidebar-text) !important;
+    stroke: var(--sidebar-text) !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="radio"] label,
+[data-testid="stSidebar"] [role="radio"] { color: var(--sidebar-text) !important; }
+.shell-logo { margin: .15rem 0 0; font-size: 1.55rem; font-weight: 800; color: var(--sidebar-text) !important; }
+.shell-logo span { color: var(--primary) !important; }
+.shell-subtitle { margin: .1rem 0 1.2rem; color: var(--sidebar-muted) !important; font-size: .75rem; }
+.shell-section-label { margin: .65rem 0 .25rem; color: var(--sidebar-muted) !important; font-size: .64rem; font-weight: 800; letter-spacing: .11rem; }
+.shell-divider { height: 1px; margin: .65rem 0; background: var(--sidebar-border); }
+.shell-user { display: flex; align-items: center; gap: .65rem; margin-top: 1rem; padding: .7rem; border-top: 1px solid var(--sidebar-border); }
+.shell-user b, .shell-user small { display: block; }
+.shell-user small { color: var(--sidebar-muted) !important; font-size: .67rem; }
+.user-avatar { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--primary); color: #fff !important; font-size: .7rem; font-weight: 800; }
+.nav-active-marker { height: 2px; margin: -.36rem .65rem .15rem; border-radius: 2px; background: var(--primary); }
 
-    input, textarea { color: var(--text-primary) !important; -webkit-text-fill-color: var(--text-primary) !important; caret-color: var(--text-primary) !important; }
-    div[data-baseweb="select"] span { color: var(--text-primary) !important; -webkit-text-fill-color: var(--text-primary) !important; }
+/* Shared */
+.page-heading { margin: 0; font-size: 1.65rem; line-height: 1.18; font-weight: 780; color: var(--text); }
+.page-kicker { margin: .2rem 0 0; font-size: .78rem; color: var(--muted); }
+.section-title { margin: 0; font-size: 1rem; line-height: 1.25; font-weight: 750; color: var(--text); }
+.section-subtitle { margin: .12rem 0 .55rem; font-size: .72rem; color: var(--muted); }
+.toolbar-label, .insight-heading { margin: .55rem 0 .2rem; color: var(--muted); font-size: .65rem; font-weight: 800; letter-spacing: .08rem; text-transform: uppercase; }
+.section-gap { height: .45rem; }
+.stButton > button { min-height: 2.4rem; border-radius: .48rem; font-weight: 650; }
+[data-testid="stMain"] .stButton > button,
+[data-testid="stAppViewContainer"] .main .stButton > button {
+    background: var(--primary) !important; border: 1px solid var(--primary) !important;
+    color: #fff !important; box-shadow: none !important;
+}
+[data-testid="stMain"] .stButton > button:hover,
+[data-testid="stAppViewContainer"] .main .stButton > button:hover {
+    background: var(--primary-hover) !important; border-color: var(--primary-hover) !important;
+}
+[data-testid="stMain"] .stButton > button:disabled { background: #94bdb8 !important; border-color: #94bdb8 !important; opacity: .72 !important; }
+.stTextInput, .stSelectbox, .stDateInput, .stTextArea, .stRadio { margin-bottom: 0 !important; }
+[data-baseweb="input"], [data-baseweb="select"] > div, textarea { border-radius: .45rem !important; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stSelectbox"] [data-baseweb="select"] * {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+}
+[data-testid="stSelectbox"] [role="combobox"],
+[data-testid="stSelectbox"] input,
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    -webkit-text-fill-color: var(--text) !important;
+    opacity: 1 !important;
+    caret-color: var(--text) !important;
+}
+[data-testid="stTextArea"] textarea:disabled,
+[data-testid="stTextArea"] textarea[disabled] {
+    background: var(--surface-soft) !important;
+    color: var(--text) !important;
+    -webkit-text-fill-color: var(--text) !important;
+    opacity: 1 !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="popover"] * { color: var(--text) !important; }
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] details,
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    border-color: var(--border) !important;
+}
+[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="select"] * {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+}
+[data-testid="stSidebar"] [data-baseweb="popover"] * { color: var(--text) !important; }
+[data-testid="stSidebar"] [data-baseweb="popover"],
+[data-testid="stSidebar"] [role="listbox"] {
+    background: var(--surface) !important;
+    color: var(--sidebar-text) !important;
+    border: 1px solid var(--sidebar-border) !important;
+}
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li { color: var(--text); }
+[data-testid="stDataFrame"] { border-color: var(--border) !important; }
+[data-testid="stTabs"] [role="tab"] {
+    color: var(--muted) !important;
+    background: transparent !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    color: var(--primary) !important;
+    border-bottom-color: var(--primary) !important;
+}
+div[data-testid="stVerticalBlockBorderWrapper"] { background: var(--surface); border-color: var(--border) !important; border-radius: .7rem !important; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: .85rem 1rem !important; }
 
-    /* Branding & Dashboard elements */
-    .brand-title { color: var(--primary) !important; font-size: 26px; line-height: 1.05; font-weight: 750; margin: 0; }
-    .brand-sub { color: var(--text-secondary) !important; font-size: 13px; margin: 2px 0 7px; }
-    .page-heading { font-size: 24px; line-height: 1.1; font-weight: 700; margin: 0; }
-    .page-kicker { color: var(--text-secondary) !important; font-size: 12px; margin: 2px 0 0; }
-    .system-status { color: var(--success) !important; background: var(--success-light); border-radius: 999px; padding: 4px 9px; font-size: 11px; font-weight: 700; white-space: nowrap; }
-    .toolbar-label, .shell-section-label { color: var(--text-muted) !important; font-size: 10px; font-weight: 750; letter-spacing: 1px; margin: 10px 0 3px; }
-    .section-title { color: var(--text-primary); font-size: 16px; font-weight: 700; margin-top: 2px; }
-    .section-subtitle { color: var(--text-secondary); font-size: 11px; margin: 0 0 5px; }
-    .section-gap { height: 8px; }
-    .kpi-context { color: var(--text-muted); font-size: 10px; margin-top: 3px; }
-    .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); padding: 15px 12px; }
-    .overview-grid div { border-left: 2px solid var(--border-strong); padding-left: 8px; }
-    .overview-grid small, .patient-cell small, .insight-chip small, .shell-user small { display: block; color: var(--text-secondary); font-size: 10px; }
-    .overview-grid b { display: block; font-size: 23px; margin-top: 5px; }
-    .amber-text { color: var(--warning); } .green-text { color: var(--success); } .blue-text { color: var(--info); }
-    .patient-table-header, .patient-cell { display: grid; }
-    .patient-table-header { grid-template-columns: 2.2fr 1.15fr 1.7fr 1.55fr 1.05fr 1.15fr; color: var(--text-muted); font-size: 10px; font-weight: 750; letter-spacing: .7px; text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--border-strong); }
-    .patient-cell { gap: 2px; padding-top: 4px; } .patient-cell b { font-size: 12px; } .table-meta { display: block; color: var(--text-secondary); font-size: 11px; padding-top: 8px; } .doctor-text { color: var(--info); }
-    .table-row-rule { border-bottom: 1px solid var(--border); margin: 2px 0; } .pagination-label { color: var(--text-secondary); font-size: 11px; text-align: center; padding-top: 7px; }
-    .shell-logo { color: #F8FAFC !important; font-size: 24px; font-weight: 800; letter-spacing: -.6px; margin: 4px 0 0; } .shell-logo span { color: #5EEAD4 !important; }
-    .shell-subtitle { color: #94A3B8 !important; font-size: 10px; line-height: 1.4; margin-bottom: 24px; }
-    .shell-section-label { color: #94A3B8 !important; margin: 12px 0 5px; } .shell-divider { border-top: 1px solid #334155; margin: 16px 0 5px; }
-    .nav-active-marker { background: #2DD4BF; height: 28px; width: 3px; position: absolute; left: 0; margin-top: -35px; }
-    .shell-user { display: flex; align-items: center; gap: 8px; border-top: 1px solid #334155; padding-top: 13px; margin-top: 28px; color: #E5E7EB !important; font-size: 11px; } .user-avatar { background: #0F766E; border-radius: 50%; padding: 7px; font-size: 10px; }
-    .clinical-graph { position: relative; overflow: hidden; margin: 8px 0 12px; background: #0F172A; border: 1px solid #1E293B; border-radius: 7px; }
-    .graph-node { position: absolute; transform: translateX(-50%); max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 999px; padding: 7px 10px; color: white; font-size: 10px; font-weight: 700; text-align: center; z-index: 2; box-shadow: 0 0 0 3px rgba(15,23,42,.65); transition: transform .15s ease; } .graph-node:hover { transform: translateX(-50%) scale(1.06); }
-    .patient-node { background: var(--primary); left: 50% !important; } .diagnosis-node { background: #7C3AED; } .symptom-node { background: #B45309; } .risk-node { background: #C2410C; }
-    .graph-edge { position: absolute; height: 1px; transform-origin: left center; background: #64748B; opacity: .65; z-index: 1; }
-    .insight-chip { display: inline-flex; align-items: center; gap: 7px; margin: 3px 4px 3px 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-secondary); } .insight-chip b { font-size: 11px; } .insight-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); } .insight-diagnosis .insight-dot { background: var(--danger); } .insight-symptom .insight-dot { background: var(--warning); } .insight-risk .insight-dot { background: #C2410C; }
-    .insight-heading { color: var(--text-secondary); font-size: 10px; font-weight: 750; letter-spacing: .7px; text-transform: uppercase; margin: 9px 0 4px; }
-    .workflow-steps { display: flex; gap: 0; margin: 14px 0 10px; color: var(--text-muted); font-size: 11px; } .workflow-steps span, .workflow-steps b { padding: 7px 16px; border-bottom: 2px solid var(--border); } .workflow-steps b { color: var(--primary); border-color: var(--primary); }
-    .recording-prompt { color: var(--text-secondary); background: var(--surface-secondary); border: 1px dashed var(--border-strong); border-radius: 6px; padding: 15px; text-align: center; font-size: 12px; }
-    .audit-note { color: var(--text-secondary); font-size: 11px; padding-bottom: 6px; }
-    @media (max-width: 1100px) { .patient-table-header, [data-testid="stHorizontalBlock"]:has(.patient-cell) { min-width: 800px; } .block-container { padding-left: 1rem !important; padding-right: 1rem !important; } }
+/* Dashboard */
+.kpi-card { min-height: 7rem; padding: .85rem 1rem; background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--primary); border-radius: .65rem; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+.kpi-title { color: var(--muted); font-size: .65rem; font-weight: 800; text-transform: uppercase; }
+.kpi-value { margin-top: .28rem; color: var(--text); font-size: 1.8rem; line-height: 1; font-weight: 790; }
+.kpi-context { margin-top: .45rem; color: var(--muted); font-size: .7rem; }
+.overview-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: .65rem; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: .65rem; }
+.overview-grid div { padding-left: .6rem; border-left: 2px solid var(--border-strong); }
+.overview-grid small { display:block; color:var(--muted); font-size:.66rem; }
+.overview-grid b { display:block; margin-top:.25rem; font-size:1.45rem; }
+.amber-text { color:var(--warning); } .green-text { color:var(--success); } .blue-text { color:var(--info); }
 
-    /* Power BI Style KPI Cards */
-    .kpi-card { background: var(--surface); padding: 9px 13px 8px; min-height: 68px; border-radius: 7px; border-top: 3px solid var(--primary); box-shadow: 0 1px 3px rgba(15,23,42,0.06); text-align: left; }
-    .kpi-title { color: var(--text-secondary) !important; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
-    .kpi-value { color: var(--text-primary) !important; font-size: 26px; line-height: 1.05; font-weight: 750; margin-top: 3px; }
+/* Table */
+.patient-table-header { display:grid; grid-template-columns:2.2fr 1.15fr 1.7fr 1.55fr 1.05fr 1.15fr; min-width:790px; padding:.45rem .5rem; border-bottom:1px solid var(--border-strong); color:var(--muted); font-size:.72rem; font-weight:800; text-transform:uppercase; }
+.patient-cell, .table-two-line { display:flex; min-height:2.45rem; flex-direction:column; justify-content:center; gap:.2rem; line-height:1.15; }
+.patient-cell b { overflow-wrap:anywhere; font-size:.86rem; }
+.patient-cell small, .table-two-line small, .table-meta { color:var(--muted); font-size:.71rem; }
+.status-pill { display:inline-flex; align-items:center; justify-content:center; padding:.28rem .52rem; border-radius:999px; font-size:.67rem; font-weight:800; }
+.status-pending { color:var(--warning); background:var(--warning-soft); }
+.status-approved { color:var(--success); background:var(--success-soft); }
+.table-row-rule { height:1px; background:var(--border); }
+.pagination-label { padding-top:.55rem; color:var(--muted); font-size:.7rem; text-align:center; }
 
-    /* Dashboard containers */
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: var(--surface) !important;
-        border-radius: 7px !important;
-        box-shadow: 0 1px 3px rgba(15,23,42,0.06);
-        padding: 7px 10px !important;
-        border: 1px solid var(--border);
-    }
-    div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stVerticalBlockBorderWrapper"]) { gap: 0.35rem; }
-    div[data-testid="stHorizontalBlock"] { gap: 0.75rem; }
-    div[data-testid="stButton"] { margin: 0; }
-    .status-pill { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 750; letter-spacing: 0.35px; }
-    .status-pending { color: var(--warning); background: var(--warning-light); }
-    .status-approved { color: var(--success); background: var(--success-light); }
-    .records-row:hover { background: var(--surface-secondary); }
-    hr { margin: 3px 0 6px !important; border-color: var(--border) !important; }
-    [data-testid="stCaptionContainer"] { color: var(--text-secondary) !important; margin: 0 !important; }
-    [data-testid="stHorizontalBlock"] { gap: 0.65rem; }
-    [data-testid="stVerticalBlock"] { gap: 0.45rem; }
-    [data-testid="stSidebar"] { background: #111827 !important; }
-    [data-testid="stSidebar"] * { color: #E5E7EB !important; }
-    [data-testid="stSidebar"] .stButton>button { background: transparent !important; border-color: transparent !important; text-align: left !important; }
-    [data-testid="stSidebar"] .stButton>button:hover { background: #164E63 !important; }
+/* Review and graph */
+.workflow-steps { display:flex; flex-wrap:wrap; margin:.25rem 0 .55rem; color:var(--muted); font-size:.72rem; }
+.workflow-steps span, .workflow-steps b { padding:.45rem 1rem; border-bottom:2px solid var(--border); }
+.workflow-steps b { color:var(--primary); border-color:var(--primary); }
+.recording-prompt { margin-top:.25rem; padding:.65rem; text-align:center; color:var(--muted); background:var(--surface-soft); border:1px dashed var(--border-strong); border-radius:.5rem; font-size:.72rem; }
+.audit-note { padding-bottom:.3rem; color:var(--muted); font-size:.68rem; }
+.summary-text { margin:.12rem 0 .55rem; white-space:pre-wrap; color:var(--text); font-size:.76rem; line-height:1.45; }
+.insight-scroll { max-height:16rem; overflow-y:auto; padding-right:.2rem; }
+.insight-category { margin:.55rem 0; }
+.insight-category-heading { margin-bottom:.28rem; color:var(--muted); font-size:.64rem; font-weight:800; text-transform:uppercase; }
+.insight-category-items { display:flex; flex-wrap:wrap; gap:.32rem; }
+.insight-chip { display:inline-flex; padding:.32rem .5rem; border:1px solid var(--border); border-radius:999px; background:transparent; }
+.insight-chip b { font-size:.68rem; }
+.insight-diagnosis { background:transparent; border-color:#fecaca; }
+.insight-symptom { background:transparent; border-color:#fcd34d; }
+.insight-risk { background:transparent; border-color:#fdba74; }
+.insight-procedure { background:transparent; border-color:#93c5fd; }
+.clinical-graph-v2 { padding:1rem; background:var(--surface); border:1px solid var(--border); border-radius:.65rem; }
+.graph-hierarchy-v2 { display:flex; flex-direction:column; align-items:center; gap:.6rem; }
+.graph-patient-card { max-width:80%; padding:.48rem .8rem; border-radius:.48rem; background:var(--primary); color:#fff; font-size:.73rem; font-weight:750; text-align:center; }
+.graph-connector-main { width:2px; height:.8rem; background:var(--border-strong); }
+.graph-categories { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; gap:.5rem; }
+.graph-category-header { margin-bottom:.35rem; color:var(--muted); font-size:.58rem; font-weight:800; text-align:center; text-transform:uppercase; }
+.graph-category-content { display:flex; flex-direction:column; gap:.3rem; }
+.graph-node-card, .graph-empty-state { padding:.52rem .4rem; border-radius:.42rem; font-size:.68rem; line-height:1.25; text-align:center; overflow-wrap:anywhere; }
+.graph-node-diagnosis { background:var(--purple); color:#fff; }
+.graph-node-symptom { background:var(--info); color:#fff; }
+.graph-node-risk { background:var(--warning); color:#fff; }
+.graph-empty-state { color:var(--muted); border:1px dashed var(--border-strong); }
+.code-table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:.55rem; background:#fff; }
+.code-table { width:100%; border-collapse:collapse; background:#fff; color:#17212b; font-size:.78rem; }
+.code-table th { padding:.65rem .55rem; background:#f1f5f9; color:#334155; border-bottom:1px solid #cbd5e1; text-align:left; font-weight:750; }
+.code-table td { padding:.65rem .55rem; background:#fff; color:#17212b; border-bottom:1px solid #e2e8f0; }
+.code-table tr:last-child td { border-bottom:0; }
+
+/* Codes */
+.code-hero { padding:1rem 1.1rem; background:linear-gradient(135deg,#ecfdf5,#f0fdfa); border:1px solid #99f6e4; border-radius:.7rem; }
+.code-hero-title { font-size:1rem; font-weight:780; color:#115e59; }
+.code-hero-text { margin-top:.25rem; color:#47706d; font-size:.75rem; }
+.code-patient { color:var(--text) !important; }
+.code-patient { margin-top:.65rem; font-size:.78rem; color:var(--text); }
+.code-empty { padding:1.2rem; text-align:center; color:var(--muted); background:var(--surface-soft); border:1px dashed var(--border-strong); border-radius:.55rem; }
+
+@media (max-width:760px) {
+    .block-container { padding:3.8rem .75rem .75rem !important; }
+    .page-heading { font-size:1.35rem; }
+    .overview-grid { grid-template-columns:1fr; }
+    .graph-node-card, .graph-empty-state { font-size:.56rem; }
+}
+
+[data-testid="collapsedControl"] {
+    color: #ffffff !important;
+    background-color: #111111 !important;
+    border: 1px solid #111111 !important;
+    border-radius: 4px !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] button {
+    color: #ffffff !important;
+    background-color: #111111 !important;
+    border: 0 !important;
+    min-width: 2.25rem !important;
+    min-height: 2.25rem !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] svg {
+    fill: #ffffff !important;
+    color: #ffffff !important;
+    stroke: #ffffff !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stSidebarCollapsedControl"] button,
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapseButton"] button {
+    background: #111111 !important;
+    color: #ffffff !important;
+    border: 1px solid #111111 !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg path,
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stSidebarCollapseButton"] svg path,
+[data-testid="collapsedControl"] svg path {
+    fill: #ffffff !important;
+    color: #ffffff !important;
+    stroke: #ffffff !important;
+    opacity: 1 !important;
+}
+/* Open sidebar: light control with a dark collapse icon. */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapseButton"] button {
+    background: #f0f2f6 !important;
+    color: #333333 !important;
+    border: 1px solid #d3d3d3 !important;
+    border-radius: 4px !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stSidebarCollapseButton"] svg path {
+    fill: #333333 !important;
+    color: #333333 !important;
+    stroke: #333333 !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebar"] {
+    background-color: #f8f9fa !important;
+    border-right: 1px solid #e9ecef !important;
+}
+[data-testid="stSidebar"] * {
+    color: #2d3748 !important;
+}
+[data-testid="stSidebar"] hr {
+    border-color: #e2e8f0 !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover,
+[data-testid="stSidebar"] [aria-current="page"] {
+    color: #0f766e !important;
+    background-color: #e6fffb !important;
+    border-color: #99f6e4 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] {
+    background-color: #ffffff !important;
+    border: 1px solid #d3d3d3 !important;
+    border-radius: 4px !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] > div {
+    background-color: #ffffff !important;
+    color: #333333 !important;
+    border-color: #d3d3d3 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="select"] input {
+    color: #333333 !important;
+    -webkit-text-fill-color: #333333 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] svg {
+    fill: #333333 !important;
+    color: #333333 !important;
+    stroke: #333333 !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="popover"] > div,
+[data-testid="stSidebar"] [data-baseweb="popover"],
+[data-testid="stSidebar"] [role="listbox"] {
+    background-color: #ffffff !important;
+    color: #333333 !important;
+    border-color: #d3d3d3 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="popover"] *,
+[data-testid="stSidebar"] [role="option"] {
+    color: #333333 !important;
+}
+/* Streamlit may render the open select menu in a portal outside the sidebar. */
+body [role="listbox"],
+body [role="listbox"] [role="option"],
+body [data-baseweb="popover"],
+body [data-baseweb="popover"] > div,
+body .react-aria-Popover,
+body .react-aria-ListBox,
+body .react-aria-ListBox [role="option"] {
+    background: #ffffff !important;
+    color: #333333 !important;
+    border-color: #d3d3d3 !important;
+}
+body [role="listbox"] *,
+body [data-baseweb="popover"] *,
+body .react-aria-Popover *,
+body .react-aria-ListBox * {
+    color: #333333 !important;
+    -webkit-text-fill-color: #333333 !important;
+}
+[data-testid="stSidebar"] .react-aria-ComboBox,
+[data-testid="stSidebar"] .react-aria-ComboBox [role="group"] {
+    background: #ffffff !important;
+    border: 1px solid #d3d3d3 !important;
+    border-radius: 4px !important;
+    color: #333333 !important;
+}
+[data-testid="stSidebar"] .react-aria-ComboBox input,
+[data-testid="stSidebar"] .react-aria-ComboBox input[role="combobox"] {
+    background: #ffffff !important;
+    color: #333333 !important;
+    -webkit-text-fill-color: #333333 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+[data-testid="stSidebar"] .react-aria-ComboBox button,
+[data-testid="stSidebar"] .react-aria-ComboBox button[aria-label="Open"] {
+    background: #ffffff !important;
+    color: #333333 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebar"] .react-aria-ComboBox button svg {
+    fill: #333333 !important;
+    color: #333333 !important;
+    stroke: #333333 !important;
+    opacity: 1 !important;
+}
+[data-testid="stSidebar"] [role="listbox"] {
+    background: #ffffff !important;
+    color: #333333 !important;
+    border: 1px solid #d3d3d3 !important;
+}
 </style>
-""", unsafe_allow_html=True)
+""".replace("{theme_vars}", theme_vars).replace("{header_background}", header_background),
+    unsafe_allow_html=True,
+)
+
 
 # ============================================================
-# 2. DATABASE INITIALIZATION & STATE MANAGEMENT
+# 3. DATABASE AND SESSION STATE
 # ============================================================
 def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f).get("records", [])
-    return []
+    if not os.path.exists(DB_FILE):
+        return []
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+            return payload.get("records", []) if isinstance(payload, dict) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
 
 def save_db(records):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump({"records": records}, f, indent=4)
+    with open(DB_FILE, "w", encoding="utf-8") as file:
+        json.dump({"records": records}, file, indent=4, ensure_ascii=False)
 
-if "records" not in st.session_state: st.session_state.records = load_db()
-if "page" not in st.session_state: st.session_state.page = "dashboard"
-if "current_record" not in st.session_state: st.session_state.current_record = None
-if "search_input" not in st.session_state: st.session_state.search_input = ""
-if "dash_page" not in st.session_state: st.session_state.dash_page = 1
-if "live_chunks" not in st.session_state: st.session_state.live_chunks = []
-if "audio_key_counter" not in st.session_state: st.session_state.audio_key_counter = 0
-if "chart_selected_date" not in st.session_state: st.session_state.chart_selected_date = None
-if "chart_cases_page" not in st.session_state: st.session_state.chart_cases_page = 1
-if "scribe_result" not in st.session_state: st.session_state.scribe_result = None
-if "cds_result" not in st.session_state: st.session_state.cds_result = None
 
-master_insights_list = [
-    "None", "Diabetes (Type 2)", "Hypertension", "Hyperlipidemia",
-    "Asthma", "Osteoarthritis", "Obesity", "Smoking History",
-    "Alcohol Use", "Anxiety", "Depression", "Fever",
-    "Chronic Cough", "Fatigue", "Headache", "Chest Pain", "Nausea", "Color Blindness"
+def initialize_state():
+    defaults = {
+        "records": load_db(),
+        "page": "dashboard",
+        "current_record": None,
+        "dash_page": 1,
+        "chart_cases_page": 1,
+        "scribe_result": None,
+        "insight_count": 1,
+        "detected_insights": [],
+        "last_record_id": None,
+        "edit_summary": "",
+        "code_results": {"icd10": [], "cpt": []},
+        "code_record_id": None,
+        "code_results_signature": None,
+        "code_matcher_version": None,
+        "code_generation_error": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+initialize_state()
+
+MASTER_INSIGHTS = [
+    "None", "Diabetes (Type 2)", "Hypertension", "Hyperlipidemia", "Asthma",
+    "Osteoarthritis", "Obesity", "Smoking History", "Alcohol Use", "Anxiety",
+    "Depression", "Fever", "Chronic Cough", "Fatigue", "Headache", "Chest Pain",
+    "Nausea", "Color Blindness", "Complete Blood Count", "A1C Test", "Chest X-ray",
+    "CT Scan", "MRI", "Ultrasound", "Blood Glucose Test",
 ]
 
+
 def get_detected_insights(transcript_text):
-    transcript_lower = transcript_text.lower()
-    detected = set()
+    text = (transcript_text or "").lower()
     keyword_map = {
         "diabetes": "Diabetes (Type 2)", "hypertension": "Hypertension", "high bp": "Hypertension",
         "cholesterol": "Hyperlipidemia", "asthma": "Asthma", "arthritis": "Osteoarthritis",
         "obesity": "Obesity", "smok": "Smoking History", "alcohol": "Alcohol Use",
-        "anxiety": "Anxiety", "depression": "Depression", "fever": "Fever", "cough": "Chronic Cough",
-        "fatigue": "Fatigue", "headache": "Headache", "chest pain": "Chest Pain", "nausea": "Nausea",
-        "color blind": "Color Blindness"
+        "anxiety": "Anxiety", "depression": "Depression", "fever": "Fever",
+        "cough": "Chronic Cough", "fatigue": "Fatigue", "headache": "Headache",
+        "chest pain": "Chest Pain", "nausea": "Nausea", "color blind": "Color Blindness",
+        "complete blood count": "Complete Blood Count", "cbc": "Complete Blood Count",
+        "a1c": "A1C Test", "hba1c": "A1C Test", "chest x-ray": "Chest X-ray",
+        "chest x ray": "Chest X-ray", "ct scan": "CT Scan", "mri": "MRI",
+        "ultrasound": "Ultrasound", "blood glucose": "Blood Glucose Test",
+        "physical therapy": "Physical Therapy", "physiotherapy": "Physical Therapy",
+        "injection": "Injection", "injections": "Injection",
     }
-    for kw, condition in keyword_map.items():
-        if kw in transcript_lower: detected.add(condition)
-    return list(detected)
+    return list(dict.fromkeys(value for keyword, value in keyword_map.items() if keyword in text))
+
+
+def get_record_insights(record):
+    transcript_insights = get_detected_insights(record.get("transcript", ""))
+    manual_insights = record.get("manual_insights", [])
+    return list(dict.fromkeys(
+        transcript_insights
+        + [item for item in manual_insights if item != "None"]
+        + ["Established Patient Office Visit"]
+    ))
+
+
+def get_code_suggestions(insights, documentation=None):
+    """Return separate ICD/CPT suggestions, using documentation context when supplied."""
+    st.session_state.code_generation_error = ""
+
+    if classify_medical_item is None or get_icd10_codes is None or get_cpt_codes is None:
+        st.session_state.code_generation_error = (
+            "code_matcher.py could not be imported. Keep code_matcher.py either in the "
+            "frontend package or in the same directory as this Streamlit file."
+        )
+        return {"icd10": [], "cpt": []}
+
+    candidates = list(dict.fromkeys(
+        str(item).strip() for item in insights if item and item != "None"
+    ))
+    if not candidates:
+        st.session_state.code_generation_error = "No codable clinical insights were detected."
+        return {"icd10": [], "cpt": []}
+
+    icd_items = []
+    cpt_items = []
+    classification_errors = []
+
+    procedure_terms = (
+        "test", "x-ray", "x ray", "scan", "mri", "ultrasound",
+        "blood", "cbc", "a1c", "hba1c", "procedure", "office visit"
+    )
+
+    for item in candidates:
+        try:
+            item_type = str(classify_medical_item(item) or "").strip().lower()
+        except Exception as error:
+            classification_errors.append(f"{item}: {error}")
+            item_type = ""
+
+        if item_type in {"cpt", "hcpcs", "procedure"}:
+            cpt_items.append(item)
+        elif item_type in {"icd10", "icd-10", "icd", "diagnosis"}:
+            icd_items.append(item)
+        elif any(term in item.lower() for term in procedure_terms):
+            cpt_items.append(item)
+        else:
+            # Diagnoses, symptoms, and risk factors should be evaluated for ICD-10.
+            icd_items.append(item)
+
+    try:
+        documentation_text = str(documentation or "").lower()
+        if "chest x-ray" in documentation_text or "chest x ray" in documentation_text:
+            has_multiple_views = any(
+                phrase in documentation_text
+                for phrase in ("1-2 view", "1 to 2 view", "two view", "2 view")
+            )
+            if has_multiple_views:
+                cpt_items = [
+                    item for item in cpt_items
+                    if "chest x-ray" not in item.lower() and "chest x ray" not in item.lower()
+                ]
+                cpt_items.append("Chest x ray 2 views")
+        if documentation is not None and get_icd10_candidate_sets and get_cpt_candidate_sets:
+            evidence = {item: documentation for item in icd_items}
+            icd_details = get_icd10_candidate_sets(icd_items, threshold=80, evidence_by_term=evidence)
+            icd_results = [
+                {
+                    "Extracted Condition": item["term"],
+                    "Matched Disease/Injury": item["selected_description"],
+                    "ICD-10 Code": item["selected_code"],
+                }
+                for item in icd_details
+                if item["status"] == "suggested"
+            ]
+            # Keep procedure candidates visible for clinician review. Whether a
+            # service was actually performed must be confirmed before billing.
+            cpt_details = get_cpt_candidate_sets(cpt_items, documentation, threshold=80)
+            cpt_results = [
+                {
+                    "Extracted Procedure": item["term"],
+                    "Matched Procedure/Service": item["selected_description"],
+                    "CPT/HCPCS Code": item["selected_code"],
+                }
+                for item in cpt_details
+                if item["status"] == "suggested"
+            ]
+        else:
+            icd_results = get_icd10_codes(icd_items, threshold=80) if icd_items else []
+            cpt_results = get_cpt_codes(cpt_items, threshold=80) if cpt_items else []
+    except Exception as error:
+        st.session_state.code_generation_error = f"Code matching failed: {error}"
+        return {"icd10": [], "cpt": []}
+
+    if classification_errors:
+        st.session_state.code_generation_error = (
+            "Some items could not be classified automatically: "
+            + "; ".join(classification_errors)
+        )
+    elif not icd_results and not cpt_results:
+        st.session_state.code_generation_error = (
+            "The matcher loaded correctly, but no entries met the 80% similarity threshold. "
+            "Check the terms and code datasets loaded by code_matcher.py."
+        )
+
+    return {"icd10": icd_results or [], "cpt": cpt_results or []}
+
+
+def get_backend_code_suggestions(insights, documentation=""):
+    """Generate codes locally without an avoidable HTTP round trip."""
+    return get_code_suggestions(insights, documentation)
+
+
 
 # ============================================================
-# REUSABLE ENTERPRISE UI COMPONENTS
+# 4. REUSABLE COMPONENTS
 # ============================================================
+def go_to(page):
+    st.session_state.page = page
+
+
+def start_new_consultation():
+    st.session_state.scribe_result = None
+    st.session_state.page = "new_consult"
+
+
+def open_record(record, destination="review"):
+    st.session_state.current_record = record
+    st.session_state.detected_insights = get_record_insights(record)
+    st.session_state.insight_count = 1
+    go_to(destination)
+
+
 def render_sidebar(active_page):
     with st.sidebar:
-        st.markdown('<div class="shell-logo">MS<span>cribe</span></div><div class="shell-subtitle">Clinical Intelligence Platform</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="shell-logo">Am<span>-Pod</span></div>'
+            '<div class="shell-subtitle">Clinical Intelligence Platform</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown('<div class="shell-section-label">WORKSPACE</div>', unsafe_allow_html=True)
-        navigation = [("dashboard", "Overview"), ("new_consult", "Consultations"), ("review", "Clinical Review"), ("dashboard", "Analytics")]
+        navigation = [
+            ("dashboard", "Overview"),
+            ("new_consult", "Consultations"),
+            ("review", "Clinical Review"),
+            ("codes", "Codes"),
+        ]
         for page_key, label in navigation:
-            active = (active_page == page_key and not (label == "Analytics" and active_page == "dashboard"))
-            if st.button(label, key=f"nav_{label.lower().replace(' ', '_')}", use_container_width=True, type="secondary"):
-                if page_key == "review" and st.session_state.current_record is None:
-                    st.session_state.page = "dashboard"
+            if st.button(label, key=f"nav_{page_key}", use_container_width=True):
+                if page_key == "review" and not st.session_state.current_record:
+                    go_to("dashboard")
                 else:
-                    st.session_state.page = page_key
+                    go_to(page_key)
                 st.rerun()
-            if active:
+            if active_page == page_key:
                 st.markdown('<div class="nav-active-marker"></div>', unsafe_allow_html=True)
+
         st.markdown('<div class="shell-divider"></div><div class="shell-section-label">UTILITY</div>', unsafe_allow_html=True)
-        st.button("Settings", key="nav_settings", use_container_width=True, type="secondary")
-        st.button("Help", key="nav_help", use_container_width=True, type="secondary")
-        st.markdown('<div class="shell-user"><div class="user-avatar">MS</div><div><b>MScribe User</b><small>Clinical Operations</small></div></div>', unsafe_allow_html=True)
+        selected_theme = st.selectbox("Theme", ["Light", "Dark"], key="theme_selector_v2")
+        if st.session_state.get("theme") != selected_theme:
+            st.session_state.theme = selected_theme
+            st.rerun()
+        st.button("Settings", key="nav_settings", use_container_width=True)
+        st.button("Help", key="nav_help", use_container_width=True)
+        st.markdown(
+            '<div class="shell-user"><div class="user-avatar">AP</div>'
+            '<div><b>Am-Pod User</b><small>Clinical Operations</small></div></div>',
+            unsafe_allow_html=True,
+        )
 
 
 def render_header(title, subtitle, show_new=True):
-    left, right = st.columns([7, 3], gap="large")
-    with left:
-        st.markdown(f'<div class="page-heading">{escape(title)}</div><div class="page-kicker">{escape(subtitle)}</div>', unsafe_allow_html=True)
-    with right:
-        status_col, action_col = st.columns([1, 2])
-        status_col.markdown('<div class="system-status">System operational</div>', unsafe_allow_html=True)
-        if show_new and action_col.button("New Consultation", key="header_new_consult", use_container_width=True):
-            st.session_state.live_chunks = []
-            st.session_state.audio_key_counter = 0
-            st.session_state.scribe_result = None
-            st.session_state.cds_result = None
-            st.session_state.page = "new_consult"
-            st.rerun()
+    left, action = st.columns([8, 2], gap="medium", vertical_alignment="center")
+    left.markdown(
+        f'<div class="page-heading">{escape(title)}</div>'
+        f'<div class="page-kicker">{escape(subtitle)}</div>',
+        unsafe_allow_html=True,
+    )
+    if show_new and action.button("New Consultation", key=f"header_new_{st.session_state.page}", use_container_width=True, type="primary"):
+        start_new_consultation()
+        st.rerun()
 
 
 def render_kpi_card(label, value, accent, context):
-    st.markdown(f'<div class="kpi-card" style="border-top-color:{accent};"><div class="kpi-title">{escape(label)}</div><div class="kpi-value">{value}</div><div class="kpi-context">{escape(context)}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="kpi-card" style="border-top-color:{accent}">'
+        f'<div class="kpi-title">{escape(label)}</div><div class="kpi-value">{value}</div>'
+        f'<div class="kpi-context">{escape(context)}</div></div>', unsafe_allow_html=True,
+    )
 
 
 def render_status_badge(status):
@@ -219,115 +801,11 @@ def render_status_badge(status):
     return f'<span class="status-pill {css_class}">{escape(status.upper())}</span>'
 
 
-def render_patient_table(records, selected_date=None):
-    if selected_date:
-        records = [record for record in records if record.get("date") == selected_date or record.get("approval_date") == selected_date]
-        st.caption(f"Cases for {selected_date} ({len(records)})")
-
-    records_per_page = 3 if selected_date else 5
-    total_pages = max(1, math.ceil(len(records) / records_per_page))
-    page_state_key = "chart_cases_page" if selected_date else "dash_page"
-    if st.session_state[page_state_key] > total_pages:
-        st.session_state[page_state_key] = 1
-    current_page = st.session_state[page_state_key]
-    current_records = records[(current_page - 1) * records_per_page:current_page * records_per_page]
-
-    st.markdown('<div class="patient-table-header"><span>Patient</span><span>ID</span><span>Doctor</span><span>Date</span><span>Status</span><span>Action</span></div>', unsafe_allow_html=True)
-    for record in current_records:
-        status = record.get("status", "Pending")
-        date_text = record.get("date", "")
-        if status == "Approved" and record.get("approval_date"):
-            date_text = f"Approved {record['approval_date']}"
-        row = st.container()
-        with row:
-            cols = st.columns([2.2, 1.15, 1.7, 1.55, 1.05, 1.15])
-            cols[0].markdown(f'<div class="patient-cell"><b>{escape(record.get("name", ""))}</b><small>{escape(record.get("age", ""))}y · {escape(record.get("gender", ""))}</small></div>', unsafe_allow_html=True)
-            cols[1].markdown(f'<span class="table-meta">{escape(record.get("id", ""))}</span>', unsafe_allow_html=True)
-            cols[2].markdown(f'<span class="table-meta doctor-text">{escape(record.get("doctor", "N/A"))}</span>', unsafe_allow_html=True)
-            cols[3].markdown(f'<span class="table-meta">{escape(date_text)}<br>{escape(record.get("time", ""))}</span>', unsafe_allow_html=True)
-            cols[4].markdown(render_status_badge(status), unsafe_allow_html=True)
-            if cols[5].button("Review" if status == "Pending" else "View", key=f"btn_{record.get('id', '')}", use_container_width=True):
-                st.session_state.current_record = record
-                st.session_state.page = "review"
-                st.session_state.insight_count = 1
-                st.session_state.detected_insights = get_detected_insights(record.get("transcript", ""))
-                st.rerun()
-        st.markdown('<div class="table-row-rule"></div>', unsafe_allow_html=True)
-
-    if total_pages > 1:
-        previous, page_info, next_page = st.columns([1, 2, 1])
-        if previous.button("Previous", key=f"prev_cases_{selected_date}", disabled=current_page == 1, use_container_width=True):
-            st.session_state[page_state_key] -= 1
-            st.rerun()
-        page_info.markdown(f'<div class="pagination-label">Page {current_page} of {total_pages}</div>', unsafe_allow_html=True)
-        if next_page.button("Next", key=f"next_cases_{selected_date}", disabled=current_page == total_pages, use_container_width=True):
-            st.session_state[page_state_key] += 1
-            st.rerun()
-
-
-def render_clinical_graph(patient_name, insights):
-    nodes = [("PATIENT", "patient-node", 50, 10)]
-    node_types = [("diabetes", "DIAGNOSIS", "diagnosis-node"), ("hypertension", "DIAGNOSIS", "diagnosis-node"), ("hyperlipidemia", "DIAGNOSIS", "diagnosis-node"), ("asthma", "DIAGNOSIS", "diagnosis-node"), ("arthritis", "DIAGNOSIS", "diagnosis-node"), ("obesity", "RISK FACTOR", "risk-node"), ("smoking", "RISK FACTOR", "risk-node"), ("alcohol", "RISK FACTOR", "risk-node")]
-    for insight in insights:
-        lowered = insight.lower()
-        category, node_class = "SYMPTOM", "symptom-node"
-        for keyword, candidate_category, candidate_class in node_types:
-            if keyword in lowered:
-                category, node_class = candidate_category, candidate_class
-                break
-        nodes.append((insight, node_class, 20 + ((len(nodes) - 1) % 3) * 30, 42 + ((len(nodes) - 1) // 3) * 34))
-    edge_markup = "".join(f'<div class="graph-edge" style="left:50%;top:28px;width:{abs(x-50)}%;transform:rotate({(x-50)*0.65}deg);"></div>' for _, _, x, y in nodes[1:])
-    node_markup = "".join(f'<div class="graph-node {node_class}" title="{escape(label)}" style="left:{x}%;top:{y}px;">{escape(label[:22])}</div>' for label, node_class, x, y in nodes)
-    height = max(190, 130 + ((len(nodes) + 2) // 3) * 34)
-    st.markdown(f'<div class="clinical-graph" style="height:{height}px;">{edge_markup}{node_markup}</div>', unsafe_allow_html=True)
-
-
-def render_insight_chip(insight):
-    lowered = insight.lower()
-    category = "SYMPTOM"
-    color_class = "insight-symptom"
-    if any(value in lowered for value in ("diabetes", "hypertension", "cholesterol", "asthma", "arthritis")):
-        category, color_class = "DIAGNOSIS", "insight-diagnosis"
-    elif any(value in lowered for value in ("smok", "alcohol", "obesity")):
-        category, color_class = "RISK FACTOR", "insight-risk"
-    st.markdown(f'<div class="insight-chip {color_class}"><span class="insight-dot"></span><div><b>{escape(insight)}</b><small>{category} · detected</small></div></div>', unsafe_allow_html=True)
-
-
-def append_selected_insights_to_note(current_text, selected_insights):
-    updated_text = current_text or ""
-    target_heading = "- **MAJOR DIAGNOSIS / ISSUES**"
-    fallback_heading1 = "- MAJOR DIAGNOSIS / ISSUES"
-    fallback_heading2 = "**MAJOR DIAGNOSIS / ISSUES**"
-
-    for value in selected_insights:
-        if not value or value == "None":
-            continue
-
-        if "Awaiting manual input." in updated_text:
-            updated_text = updated_text.replace("Awaiting manual input.", f"• {value}")
-        elif target_heading in updated_text:
-            parts = updated_text.split(target_heading, 1)
-            updated_text = parts[0] + target_heading + f"\n• {value}" + parts[1]
-        elif fallback_heading1 in updated_text:
-            parts = updated_text.split(fallback_heading1, 1)
-            updated_text = parts[0] + fallback_heading1 + f"\n• {value}" + parts[1]
-        elif fallback_heading2 in updated_text:
-            parts = updated_text.split(fallback_heading2, 1)
-            updated_text = parts[0] + fallback_heading2 + f"\n• {value}" + parts[1]
-        else:
-            updated_text = f"{target_heading}\n• {value}\n\n" + updated_text
-
-    return updated_text
-
-
-def parse_transcript_entries(transcript: str, doctor_name: str = "Doctor", patient_name: str = "Patient") -> list[dict]:
+def parse_transcript_entries(transcript, doctor_name="Doctor", patient_name="Patient"):
     text = (transcript or "").strip()
     if not text:
         return []
-
-    entries: list[dict] = []
-    current_speaker = doctor_name
-    current_text = ""
+    entries, current_speaker, current_text = [], doctor_name, ""
 
     def flush():
         nonlocal current_text
@@ -339,416 +817,595 @@ def parse_transcript_entries(transcript: str, doctor_name: str = "Doctor", patie
         line = raw_line.strip()
         if not line:
             continue
-
         match = re.match(r"^(doctor|patient)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
         if match:
             flush()
-            speaker = match.group(1).strip().lower()
-            current_speaker = doctor_name if speaker == "doctor" else patient_name
+            current_speaker = doctor_name if match.group(1).lower() == "doctor" else patient_name
             current_text = match.group(2).strip()
-            continue
-
-        if current_text:
-            current_text = f"{current_text} {line}"
         else:
-            current_speaker = doctor_name
-            current_text = line
-
+            current_text = f"{current_text} {line}".strip()
     flush()
-
-    if not entries:
-        return [{"Speaker": doctor_name, "Text": text}]
-
-    return entries
+    return entries or [{"Speaker": doctor_name, "Text": text}]
 
 
-def render_transcript(record):
+def append_selected_insights_to_note(current_text, selected_insights):
+    updated = current_text or ""
+    values = [value for value in selected_insights if value and value != "None"]
+    if not values:
+        return updated
+    additions = "\n".join(f"• {value}" for value in values)
+    heading = "MAJOR DIAGNOSIS / ISSUES"
+    if "Awaiting manual input." in updated:
+        return updated.replace("Awaiting manual input.", additions, 1)
+    if heading in updated:
+        return f"{updated.rstrip()}\n{additions}"
+    return f"{updated.rstrip()}\n\n{heading}\n{additions}".strip()
+
+
+def render_patient_table(records, selected_date=None):
+    if selected_date:
+        records = [r for r in records if selected_date in (r.get("date"), r.get("approval_date"))]
+        st.caption(f"Cases for {selected_date} ({len(records)})")
+    per_page = 3 if selected_date else 5
+    state_key = "chart_cases_page" if selected_date else "dash_page"
+    total_pages = max(1, math.ceil(len(records) / per_page))
+    st.session_state[state_key] = min(max(st.session_state[state_key], 1), total_pages)
+    current_page = st.session_state[state_key]
+    current_records = records[(current_page - 1) * per_page: current_page * per_page]
+    st.markdown(
+        '<div class="patient-table-header"><span>Patient</span><span>ID</span><span>Doctor</span>'
+        '<span>Date</span><span>Status</span><span>Action</span></div>', unsafe_allow_html=True,
+    )
+    for row_index, record in enumerate(current_records):
+        columns = st.columns([2.2, 1.15, 1.7, 1.55, 1.05, 1.15], vertical_alignment="center")
+        columns[0].markdown(f'<div class="patient-cell"><b>{escape(record.get("name", ""))}</b><small>{escape(str(record.get("age", "")))}y · {escape(record.get("gender", ""))}</small></div>', unsafe_allow_html=True)
+        columns[1].markdown(f'<span class="table-meta">{escape(record.get("id", ""))}</span>', unsafe_allow_html=True)
+        columns[2].markdown(f'<span class="table-meta">{escape(record.get("doctor", "N/A"))}</span>', unsafe_allow_html=True)
+        date_text = record.get("approval_date") if record.get("status") == "Approved" else record.get("date", "")
+        columns[3].markdown(f'<div class="table-two-line"><span>{escape(date_text or "")}</span><small>{escape(record.get("time", ""))}</small></div>', unsafe_allow_html=True)
+        columns[4].markdown(render_status_badge(record.get("status", "Pending")), unsafe_allow_html=True)
+        key_suffix = f'{record.get("id", "record")}_{row_index}_{current_page}'
+        if columns[5].button("View" if record.get("status") == "Approved" else "Review", key=f"record_{key_suffix}", use_container_width=True):
+            open_record(record)
+            st.rerun()
+        st.markdown('<div class="table-row-rule"></div>', unsafe_allow_html=True)
+    if total_pages > 1:
+        previous, info, next_col = st.columns([1, 2, 1], vertical_alignment="center")
+        if previous.button("Previous", key=f"previous_{state_key}", disabled=current_page == 1, use_container_width=True):
+            st.session_state[state_key] -= 1
+            st.rerun()
+        info.markdown(f'<div class="pagination-label">Page {current_page} of {total_pages}</div>', unsafe_allow_html=True)
+        if next_col.button("Next", key=f"next_{state_key}", disabled=current_page == total_pages, use_container_width=True):
+            st.session_state[state_key] += 1
+            st.rerun()
+
+
+def get_insight_category(insight):
+    lowered = insight.lower()
+    if any(x in lowered for x in ("diabetes", "hypertension", "cholesterol", "asthma", "arthritis")):
+        return "Diagnoses", "insight-diagnosis"
+    if any(x in lowered for x in ("smok", "alcohol", "obesity")):
+        return "Risk Factors", "insight-risk"
+    if any(x in lowered for x in ("x-ray", "ct scan", "blood", "cbc", "a1c", "mri", "ultrasound")):
+        return "Tests/Procedures", "insight-procedure"
+    return "Symptoms", "insight-symptom"
+
+
+def render_grouped_insights(insights):
+    grouped = {category: [] for category in ("Diagnoses", "Symptoms", "Risk Factors", "Tests/Procedures")}
+    for insight in insights:
+        category, css_class = get_insight_category(insight)
+        grouped[category].append((insight, css_class))
+    parts = ['<div class="insight-scroll">']
+    for category, values in grouped.items():
+        if not values:
+            continue
+        parts.append(f'<div class="insight-category"><div class="insight-category-heading">{escape(category)} ({len(values)})</div><div class="insight-category-items">')
+        for insight, css_class in values:
+            parts.append(f'<div class="insight-chip {css_class}"><b>{escape(insight)}</b></div>')
+        parts.append("</div></div>")
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def render_clinical_graph(patient_name, insights):
+    categories = {"Diagnoses": [], "Symptoms": [], "Risk Factors": []}
+    for insight in insights:
+        category, _ = get_insight_category(insight)
+        categories[category if category in categories else "Symptoms"].append(insight)
+    class_map = {"Diagnoses": "diagnosis", "Symptoms": "symptom", "Risk Factors": "risk"}
+    parts = ['<div class="clinical-graph-v2"><div class="graph-hierarchy-v2">', f'<div class="graph-patient-card">Patient: {escape(patient_name[:40])}</div>', '<div class="graph-connector-main"></div><div class="graph-categories">']
+    for category, values in categories.items():
+        parts.append(f'<div><div class="graph-category-header">{category}</div><div class="graph-category-content">')
+        if values:
+            for value in values:
+                parts.append(f'<div class="graph-node-card graph-node-{class_map[category]}">{escape(value)}</div>')
+        else:
+            parts.append(f'<div class="graph-empty-state">No {category.lower()} detected</div>')
+        parts.append("</div></div>")
+    parts.append("</div></div></div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def clean_clinical_text(value):
+    text = unescape(str(value or ""))
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def render_summary(summary):
+    text = clean_clinical_text(summary)
+    if not text:
+        st.caption("No clinical summary is available.")
+        return
+    headings = {"subjective", "objective", "chief complaint", "history of present illness", "past medical history", "current medications", "assessment", "plan"}
+    fields, current_heading, current_lines = [], None, []
+    for line in text.splitlines():
+        inline_heading = re.match(r"^\s*(Subjective|Objective|Assessment|Plan)\s*:\s*(.*)$", line, re.IGNORECASE)
+        if inline_heading:
+            if current_heading:
+                fields.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading = inline_heading.group(1)
+            current_lines = [inline_heading.group(2)] if inline_heading.group(2) else []
+            continue
+        stripped = line.strip().strip("#*- ").rstrip(":")
+        if stripped.lower() in headings:
+            if current_heading and current_lines:
+                fields.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading, current_lines = stripped, []
+        elif current_heading:
+            current_lines.append(line)
+    if current_heading and current_lines:
+        fields.append((current_heading, "\n".join(current_lines).strip()))
+    if not fields:
+        st.markdown(f'<div class="summary-text">{escape(text)}</div>', unsafe_allow_html=True)
+        return
+    for heading, value in fields:
+        st.markdown(f"**{heading.title()}**")
+        st.markdown(f'<div class="summary-text">{escape(value)}</div>', unsafe_allow_html=True)
+
+
+def render_cds_recommendations(recommendations):
+    text = clean_clinical_text(recommendations)
+    sections = {"Recommendation": "", "Reasoning": "", "Safety Note": ""}
+    pattern = r"(?im)^\s*#{0,6}\s*(Recommendation|Reasoning|Safety Note)\s*:?\s*$"
+    matches = list(re.finditer(pattern, text))
+    if matches:
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            sections[match.group(1).title()] = text[match.end():end].strip()
+    else:
+        sections["Recommendation"] = text
+    tabs = st.tabs(list(sections.keys()))
+    for tab, (label, content) in zip(tabs, sections.items()):
+        with tab:
+            if content:
+                st.markdown(content)
+            else:
+                st.caption(f"No {label.lower()} provided.")
+
+
+def render_code_results(values, empty_message):
+    if not values:
+        st.markdown(f'<div class="code-empty">{escape(empty_message)}</div>', unsafe_allow_html=True)
+        return
+    if isinstance(values, list) and values and isinstance(values[0], dict):
+        columns = list(values[0].keys())
+        header = "".join(f"<th>{escape(str(column))}</th>" for column in columns)
+        body = "".join(
+            "<tr>" + "".join(f"<td>{escape(str(row.get(column, "")))}</td>" for column in columns) + "</tr>"
+            for row in values
+        )
+        st.markdown(
+            f'<div class="code-table-wrap"><table class="code-table"><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        for value in values if isinstance(values, list) else [values]:
+            st.markdown(f"- {escape(str(value))}")
+
+
+def render_transcript(record, read_only=False):
     with st.expander("Transcript Audit Trail", expanded=False):
-        doc_name = record.get("doctor", "Doctor")
-        patient_name = record.get("name", "Patient")
-        transcript_data = record.get("transcript_data")
-        if not transcript_data or len(transcript_data) == 1 and transcript_data[0].get("Text") == record.get("transcript"):
-            transcript_data = parse_transcript_entries(record.get("transcript", ""), doc_name, patient_name)
-        transcript_df = pd.DataFrame(transcript_data if transcript_data else [{"Speaker": doc_name, "Text": record.get("transcript", "No transcript found.")}])
-        st.markdown(f'<div class="audit-note">Editable clinical conversation · {len(transcript_df)} entries</div>', unsafe_allow_html=True)
-        return st.data_editor(transcript_df, use_container_width=True, num_rows="dynamic", hide_index=True, column_config={"Speaker": st.column_config.SelectboxColumn("Speaker", width="medium", options=[doc_name, patient_name, "Unknown"], required=True), "Text": st.column_config.TextColumn("Spoken Text", width="large")})
+        doctor, patient = record.get("doctor", "Doctor"), record.get("name", "Patient")
+        rows = record.get("transcript_data") or parse_transcript_entries(record.get("transcript", ""), doctor, patient)
+        frame = pd.DataFrame(rows or [{"Speaker": doctor, "Text": "No transcript found."}])
+        label = "Read-only clinical conversation" if read_only else "Editable clinical conversation"
+        st.markdown(f'<div class="audit-note">{label} · {len(frame)} entries</div>', unsafe_allow_html=True)
+        if read_only:
+            st.dataframe(frame, use_container_width=True, hide_index=True)
+            return frame
+        return st.data_editor(frame, use_container_width=True, num_rows="dynamic", hide_index=True,
+            column_config={"Speaker": st.column_config.SelectboxColumn("Speaker", options=[doctor, patient, "Unknown"], required=True), "Text": st.column_config.TextColumn("Spoken Text", width="large")})
+
 
 # ============================================================
-# PAGE 1: DASHBOARD
+# 5. DASHBOARD
 # ============================================================
 def show_dashboard():
     render_sidebar("dashboard")
     render_header("Clinical Operations", "Consultation and documentation overview")
-
-    # --- FILTERING & SEARCH ---
     st.markdown('<div class="toolbar-label">RECORD DIRECTORY</div>', unsafe_allow_html=True)
-    f_col1, f_col2, f_col3 = st.columns([5, 2, 3])
-    with f_col1:
-        search_query = st.text_input("Search patient or ID", placeholder="Search patient or ID").strip().lower()
-    custom_dates = None
-    with f_col2:
-        date_filter = st.selectbox("Date", ["All Time", "Today", "Last 7 Days", "Last 30 Days", "Custom Date Range"])
-    with f_col3:
-        status_filter = st.selectbox("Status", ["All Statuses", "Pending", "Approved"])
-    if date_filter == "Custom Date Range":
-        with f_col3:
-            custom_dates = st.date_input("Custom Range", value=(datetime.now().date(), datetime.now().date()))
-
-    filtered_records = []
-    today = datetime.now().date()
+    filter_search, filter_date, filter_status = st.columns([5, 2, 3])
+    search_query = filter_search.text_input("Search patient or ID", placeholder="Search patient or ID").strip().lower()
+    date_filter = filter_date.selectbox("Date", ["All Time", "Today", "Last 7 Days", "Last 30 Days", "Custom Date Range"])
+    status_filter = filter_status.selectbox("Status", ["All Statuses", "Pending", "Approved"])
+    custom_dates = st.date_input("Custom Range", value=(datetime.now().date(), datetime.now().date())) if date_filter == "Custom Date Range" else None
+    today, filtered = datetime.now().date(), []
     for record in st.session_state.records:
-        if search_query and (search_query not in record["name"].lower() and search_query not in record["id"].lower()):
+        searchable = f'{record.get("name", "")} {record.get("id", "")}'.lower()
+        if search_query and search_query not in searchable:
             continue
         if status_filter != "All Statuses" and record.get("status") != status_filter:
             continue
         try:
-            rec_date = datetime.strptime(record["date"], "%d/%m/%Y").date()
-        except ValueError:
-            rec_date = today
-        keep = True
-        if date_filter == "Today": keep = (rec_date == today)
-        elif date_filter == "Last 7 Days": keep = 0 <= (today - rec_date).days <= 7
-        elif date_filter == "Last 30 Days": keep = 0 <= (today - rec_date).days <= 30
-        elif date_filter == "Custom Date Range":
-            if isinstance(custom_dates, tuple) and len(custom_dates) == 2:
-                keep = custom_dates[0] <= rec_date <= custom_dates[1]
-            elif isinstance(custom_dates, tuple) and len(custom_dates) == 1:
-                keep = rec_date == custom_dates[0]
-        if keep: filtered_records.append(record)
-
-    # --- CALCULATE KPIs ---
-    total = len(filtered_records)
-    pending = sum(1 for r in filtered_records if r["status"] == "Pending")
-    approved = sum(1 for r in filtered_records if r["status"] == "Approved")
-    today_count = sum(1 for r in filtered_records if r.get("date", "") == today.strftime("%d/%m/%Y"))
-
-    # --- RENDER KPI CARDS ---
-    k1, k2, k3, k4 = st.columns(4)
-    with k1: render_kpi_card("Total Consultations", total, "#0F766E", "All recorded consults")
-    with k2: render_kpi_card("Today's Volume", today_count, "#2563EB", "Created today")
-    with k3: render_kpi_card("Pending Review", pending, "#B45309", "Requires attention")
-    with k4: render_kpi_card("Approved Notes", approved, "#15803D", "Completed documentation")
-
+            record_date = datetime.strptime(record.get("date", ""), "%d/%m/%Y").date()
+        except (ValueError, TypeError):
+            continue
+        keep = date_filter == "All Time"
+        if date_filter == "Today": keep = record_date == today
+        elif date_filter == "Last 7 Days": keep = 0 <= (today - record_date).days <= 7
+        elif date_filter == "Last 30 Days": keep = 0 <= (today - record_date).days <= 30
+        elif date_filter == "Custom Date Range" and isinstance(custom_dates, tuple): keep = len(custom_dates) == 2 and custom_dates[0] <= record_date <= custom_dates[1]
+        if keep: filtered.append(record)
+    total = len(filtered)
+    pending = sum(r.get("status") == "Pending" for r in filtered)
+    approved = sum(r.get("status") == "Approved" for r in filtered)
+    today_count = sum(r.get("date") == today.strftime("%d/%m/%Y") for r in filtered)
+    kpis = st.columns(4)
+    for col, item in zip(kpis, [("Total Consultations", total, "#0f766e", "All recorded consults"), ("Today's Volume", today_count, "#2563eb", "Created today"), ("Pending Review", pending, "#b45309", "Requires attention"), ("Approved Notes", approved, "#15803d", "Completed documentation")]):
+        with col: render_kpi_card(*item)
     st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
-
-    # --- RENDER TIME SERIES GRAPH (True Event Snapshot Logic) ---
-    selected_date = st.session_state.chart_selected_date
-    chart_column, overview_column = st.columns([6.5, 3.5], gap="large")
-    with chart_column:
+    chart_col, overview_col = st.columns([6.5, 3.5], gap="large")
+    with chart_col:
         st.markdown('<div class="section-title">Consultation Activity</div><div class="section-subtitle">Daily consultation throughput and backlog</div>', unsafe_allow_html=True)
-        if selected_date and st.button("Show all dates", key="clear_chart_filter"):
-            st.session_state.chart_selected_date = None
-            st.session_state.chart_cases_page = 1
-            st.rerun()
-        if total > 0:
-
-            # Step 1: Collect every unique date that something happened (creation or approval)
-            all_dates = set()
-            for r in filtered_records:
-                if 'date' in r: all_dates.add(r['date'])
-                if 'approval_date' in r: all_dates.add(r['approval_date'])
-                # Fallback for old records that were approved before we added approval_date
-                elif r.get('status') == 'Approved': all_dates.add(r['date'])
-
-            # Step 2: Sort dates chronologically
-            sorted_dates = sorted(list(all_dates), key=lambda d: pd.to_datetime(d, format="%d/%m/%Y", errors='coerce'))
-
-            chart_data = []
-            cum_created = 0
-            cum_approved = 0
-
-            # Step 3: Walk through time day-by-day and calculate metrics
-            for d in sorted_dates:
-                # Count records created on this specific day
-                created_today = sum(1 for r in filtered_records if r.get('date') == d)
-
-                # Count records approved on this specific day
-                approved_today = sum(1 for r in filtered_records if r.get('status') == 'Approved' and r.get('approval_date', r.get('date')) == d)
-
-                cum_created += created_today
-                cum_approved += approved_today
-
-                # True backlog at the end of this day
-                current_pending = cum_created - cum_approved
-
-                chart_data.append({
-                    'DateStr': d,
-                    'DateObj': pd.to_datetime(d, format="%d/%m/%Y", errors='coerce'),
-                    'New Consults': created_today,
-                    'Approved Today': approved_today,
-                    'Total Pending Backlog': current_pending
-                })
-
-            df_chart = pd.DataFrame(chart_data).dropna(subset=['DateObj'])
-
-            if not df_chart.empty:
-                melted_df = df_chart.melt(
-                    id_vars=['DateStr', 'DateObj'],
-                    value_vars=['New Consults', 'Approved Today', 'Total Pending Backlog'],
-                    var_name='Metric',
-                    value_name='Count'
-                )
-
-                color_scale = alt.Scale(
-                    domain=['New Consults', 'Approved Today', 'Total Pending Backlog'],
-                    range=['#2563EB', '#10B981', '#E11D48']
-                )
-
-                chart_point = alt.selection_point(name="chart_point", fields=["DateStr"], empty=False)
-                line_chart = alt.Chart(melted_df).mark_line(point=True).add_params(chart_point).encode(
-                    x=alt.X('DateStr:O', title='Date', sort=alt.EncodingSortField(field='DateObj', order='ascending'), axis=alt.Axis(labelAngle=-45, grid=False)),
-                    y=alt.Y('Count:Q', title='Number of Records', axis=alt.Axis(tickMinStep=1)),
-                    color=alt.Color('Metric:N', scale=color_scale, legend=alt.Legend(title="", orient="top", symbolType="circle")),
-                    tooltip=[alt.Tooltip('DateStr:N', title='Date'), 'Metric:N', 'Count:Q']
-                ).properties(height=220)
-
-                chart_event = st.altair_chart(line_chart, use_container_width=True, on_select="rerun", key="dashboard_chart")
-                selected_points = chart_event.selection.get("chart_point", [])
-                if selected_points:
-                    clicked_date = selected_points[0].get("DateStr")
-                    if clicked_date != st.session_state.chart_selected_date:
-                        st.session_state.chart_selected_date = clicked_date
-                        st.session_state.chart_cases_page = 1
-                        st.rerun()
-            else:
-                st.caption("Not enough valid date data to generate chart.")
-
-    with overview_column:
+        events = []
+        for record in filtered:
+            events.append({"Date": record.get("date"), "Metric": "New Consults"})
+            if record.get("status") == "Approved": events.append({"Date": record.get("approval_date", record.get("date")), "Metric": "Approved"})
+        if events:
+            frame = pd.DataFrame(events)
+            frame["Date"] = pd.to_datetime(frame["Date"], format="%d/%m/%Y", errors="coerce")
+            counts = frame.dropna(subset=["Date"]).groupby(["Date", "Metric"]).size().reset_index(name="Count")
+            chart = alt.Chart(counts).mark_line(point=True).encode(
+                x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d, %Y")),
+                y=alt.Y("Count:Q", title="Records"),
+                color=alt.Color("Metric:N", legend=alt.Legend(title="")),
+                tooltip=[alt.Tooltip("Date:T", title="Date", format="%b %d, %Y"), "Metric:N", "Count:Q"],
+            ).properties(height=220).configure(
+                background="#ffffff" if theme_name == "Light" else "#1e293b"
+            ).configure_view(
+                strokeWidth=0
+            ).configure_axis(
+                labelColor="#17212b" if theme_name == "Light" else "#e5e7eb",
+                titleColor="#17212b" if theme_name == "Light" else "#e5e7eb",
+                gridColor="#e2e8f0" if theme_name == "Light" else "#334155",
+            ).configure_legend(
+                labelColor="#17212b" if theme_name == "Light" else "#e5e7eb",
+                titleColor="#17212b" if theme_name == "Light" else "#e5e7eb",
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else: st.info("No consultation activity is available for the selected filters.")
+    with overview_col:
+        approval_rate = round(approved / total * 100) if total else 0
         st.markdown('<div class="section-title">Clinical Overview</div><div class="section-subtitle">Current operating position</div>', unsafe_allow_html=True)
-        approval_rate = round((approved / total) * 100) if total else 0
         st.markdown(f'<div class="overview-grid"><div><small>Pending review</small><b class="amber-text">{pending}</b></div><div><small>Approval rate</small><b class="green-text">{approval_rate}%</b></div><div><small>Today\'s consultations</small><b class="blue-text">{today_count}</b></div></div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
-
-    # --- PAGINATED DATA TABLE ---
-    st.markdown('<div class="section-title">Patient Records</div><div class="section-subtitle">Clinical documentation queue</div>', unsafe_allow_html=True)
-    if total > 0:
-        render_patient_table(filtered_records, selected_date)
+    st.markdown('<div class="section-gap"></div><div class="section-title">Patient Records</div><div class="section-subtitle">Clinical documentation queue</div>', unsafe_allow_html=True)
+    if filtered:
+        render_patient_table(filtered)
     else:
         st.info("No clinical records found.")
 
+
 # ============================================================
-# PAGE 2: NEW CONSULTATION
+# 6. NEW CONSULTATION
 # ============================================================
 def show_new_consultation():
     render_sidebar("new_consult")
     render_header("New Consultation", "Capture patient context and generate clinical documentation", show_new=False)
     st.markdown('<div class="workflow-steps"><b>01 Patient</b><span>02 Record</span><span>03 Generate</span><span>04 Review</span></div>', unsafe_allow_html=True)
-    st.button("Back to Dashboard", on_click=lambda: st.session_state.update(page="dashboard"))
-
+    if st.button("Back to Dashboard"):
+        go_to("dashboard"); st.rerun()
     with st.container(border=True):
         st.markdown('<div class="section-title">Patient Information</div><div class="section-subtitle">Enter the basic context for this consultation</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2, gap="large")
-        pat_name = col1.text_input("Full Name (e.g. John Doe)")
-        pat_age = col2.text_input("Age")
-        pat_gender = col1.selectbox("Gender", ["Male", "Female", "Other"])
-        doc_name = col2.text_input("Attending Doctor (e.g. Dr. Sarah Jenkins)")
-
-    st.write("")
-
+        left, right = st.columns(2, gap="large")
+        patient_name = left.text_input("Full Name", placeholder="e.g. John Doe")
+        patient_age = right.text_input("Age")
+        patient_gender = left.selectbox("Gender", ["Male", "Female", "Other"])
+        doctor_name = right.text_input("Attending Doctor", placeholder="e.g. Dr. Sarah Jenkins")
     with st.container(border=True):
         st.markdown('<div class="section-title">Record Consultation</div><div class="section-subtitle">Capture the clinical conversation securely</div>', unsafe_allow_html=True)
         audio_file = st.audio_input("Record Audio", label_visibility="collapsed")
-
         st.markdown('<div class="recording-prompt">Audio input ready when you are</div>', unsafe_allow_html=True)
-        generate_disabled = audio_file is None or not pat_name.strip()
-
-        if st.button("Transcribe and Generate Summary", type="primary", use_container_width=True, disabled=generate_disabled):
-            if not pat_name.strip():
-                st.error("Patient name is required!")
-                return
-
-            with st.spinner("Transcribing audio..."):
-                recognizer = sr.Recognizer()
-                try:
-                    with sr.AudioFile(io.BytesIO(audio_file.read())) as source:
-                        audio_data = recognizer.record(source)
-                    transcript = recognizer.recognize_google(audio_data)
-                except Exception as error:
-                    transcript = ""
-                    st.error(f"Error processing audio: {error}")
-
-            with st.spinner("Generating clinical summary..."):
-                try:
-                    encounter = HealthcareApiClient().scribe_encounter(transcript)
-                except RuntimeError as error:
-                    st.error(str(error))
-                    st.info("Start the backend in another terminal, then try generating the note again.")
-                    return
-                except requests.exceptions.HTTPError as error:
-                    st.error(f"Backend analysis failed: {error.response.text}")
-                    return
-                st.session_state.scribe_result = encounter
-                st.session_state.cds_result = None
+        if st.button("Transcribe and Generate Summary", type="primary", use_container_width=True, disabled=audio_file is None or not patient_name.strip()):
+            transcript = ""
+            try:
+                with st.spinner("Transcribing audio..."):
+                    recognizer = sr.Recognizer()
+                    with sr.AudioFile(io.BytesIO(audio_file.getvalue())) as source:
+                        transcript = recognizer.recognize_google(recognizer.record(source))
+                with st.spinner("Generating clinical summary and CDS recommendations..."):
+                    st.session_state.scribe_result = HealthcareApiClient().analyze_encounter(transcript)
                 st.rerun()
-
-        scribe_result = st.session_state.get("scribe_result")
-        if scribe_result:
+            except Exception as error:
+                if transcript:
+                    st.session_state.scribe_result = {
+                        "transcript": transcript,
+                        "soap_note": "",
+                        "patient_summary": "",
+                        "key_highlights": [],
+                        "retrieved_guidelines": "",
+                        "recommendations": "",
+                    }
+                    st.warning(
+                        "The clinical summary service is unavailable, so the transcript was kept. "
+                        f"Local ICD-10/CPT matching can still continue. Details: {error}"
+                    )
+                else:
+                    st.error(f"Unable to process the consultation: {error}")
+        result = st.session_state.scribe_result
+        if result:
             st.markdown('<div class="section-title">Transcript</div>', unsafe_allow_html=True)
-            st.text_area("Generated transcript", value=scribe_result.get("transcript", ""), height=160, disabled=True)
+            st.text_area("Generated transcript", value=result.get("transcript", ""), height=150, disabled=True, label_visibility="collapsed")
             st.markdown('<div class="section-title">Summary and Key Highlights</div>', unsafe_allow_html=True)
-            st.write(scribe_result.get("patient_summary", "Not available"))
-            for highlight in scribe_result.get("key_highlights", []):
-                st.markdown(f"- {highlight}")
-
-            include_cds = st.radio(
-                "Generate Clinical Decision Support response?",
-                options=[True, False],
-                format_func=lambda value: "Yes, generate CDS recommendations" if value else "No, create documentation only",
-                key="include_cds",
-                horizontal=True,
-            )
+            render_summary(result.get("soap_note") or result.get("patient_summary", "Not available"))
+            for highlight in result.get("key_highlights", []): st.markdown(f"- {highlight}")
+            if result.get("recommendations"):
+                st.success("Clinical Decision Support recommendations generated.")
+                with st.container(border=True):
+                    st.markdown('<div class="section-title">Clinical Decision Support Recommendations</div><div class="section-subtitle">Evidence-based guidance for this encounter</div>', unsafe_allow_html=True)
+                    render_cds_recommendations(result["recommendations"])
+            else:
+                st.info("Clinical Decision Support recommendations will be generated when you save this note.")
             if st.button("Generate Note", type="primary", use_container_width=True):
-                encounter = scribe_result
-                if include_cds:
-                    try:
+                encounter = result
+                try:
+                    if not encounter.get("recommendations"):
                         encounter = HealthcareApiClient().add_cds(encounter)
-                    except RuntimeError as error:
-                        st.error(str(error))
-                        return
-                    except requests.exceptions.HTTPError as error:
-                        st.error(f"Backend analysis failed: {error.response.text}")
-                        return
-
-                diarized_transcript = encounter.get("transcript", "")
-                doctor_label = doc_name or "Doctor"
-                patient_label = pat_name or "Patient"
-                now = datetime.now()
-                new_record = {
-                    "id": f"PT-{str(uuid.uuid4().int)[:4]}", "name": pat_name, "age": pat_age, "gender": pat_gender,
-                    "date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M"), "doctor": doctor_label,
-                    "status": "Pending", "transcript": diarized_transcript,
-                    "transcript_data": parse_transcript_entries(diarized_transcript, doctor_label, patient_label),
-                    "summary": encounter.get("soap_note", ""),
-                    "patient_summary": encounter.get("patient_summary", ""),
-                    "key_highlights": encounter.get("key_highlights", []),
-                    "retrieved_guidelines": encounter.get("retrieved_guidelines", ""),
-                    "recommendations": encounter.get("recommendations", ""),
-                    "cds_requested": include_cds,
-                    "analysis_version": ANALYSIS_VERSION,
-                }
-                st.session_state.records.insert(0, new_record)
+                except (RuntimeError, requests.exceptions.HTTPError) as error:
+                    st.warning(
+                        "Clinical decision support is unavailable, so the encounter will be saved "
+                        f"without recommendations. Local ICD-10/CPT matching can still continue. Details: {error}"
+                    )
+                transcript = encounter.get("transcript", "")
+                doctor, now = doctor_name.strip() or "Doctor", datetime.now()
+                record = {"id": f"PT-{str(uuid.uuid4().int)[:6]}", "name": patient_name.strip(), "age": patient_age.strip(), "gender": patient_gender, "doctor": doctor, "date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M"), "status": "Pending", "transcript": transcript, "transcript_data": parse_transcript_entries(transcript, doctor, patient_name.strip()), "summary": encounter.get("soap_note", ""), "patient_summary": encounter.get("patient_summary", ""), "key_highlights": encounter.get("key_highlights", []), "retrieved_guidelines": encounter.get("retrieved_guidelines", ""), "recommendations": encounter.get("recommendations", ""), "cds_requested": True, "analysis_version": ANALYSIS_VERSION}
+                st.session_state.records.insert(0, record)
                 save_db(st.session_state.records)
-                st.session_state.current_record = new_record
-                st.session_state.insight_count = 1
-                st.session_state.detected_insights = get_detected_insights(diarized_transcript)
-                st.session_state.page = "review"
+                open_record(record)
                 st.rerun()
+
 
 # ============================================================
-# PAGE 3: REVIEW NOTE
+# 7. REVIEW
 # ============================================================
 def show_review_note():
     render_sidebar("review")
     record = st.session_state.current_record
-    is_current_analysis = record.get("analysis_version") == ANALYSIS_VERSION
-
-    top_back, top_title, top_status = st.columns([1, 6, 2])
-    with top_back:
-        if st.button("Back", key="review_back"):
-            st.session_state.page = "dashboard"
-            st.rerun()
-    with top_title:
-        st.markdown(f'<div class="page-heading">{escape(record.get("name", ""))}</div><div class="page-kicker">{escape(record.get("id", ""))} · {escape(record.get("age", ""))}y · {escape(record.get("gender", ""))} · {escape(record.get("doctor", "N/A"))}</div>', unsafe_allow_html=True)
-    with top_status:
-        st.markdown(render_status_badge(record.get("status", "Pending")), unsafe_allow_html=True)
-
-    if "edit_summary" not in st.session_state or st.session_state.get('last_record_id') != record.get('id'):
-        st.session_state.edit_summary = record.get('summary', '')
-        st.session_state.last_record_id = record.get('id')
-
-    col_left, col_right = st.columns([6, 4], gap="large")
-
-    with col_left:
-        st.markdown('<div class="section-title">Transcript</div><div class="section-subtitle">Source conversation used for analysis</div>', unsafe_allow_html=True)
-        st.text_area(
-            "Transcript",
-            value=record.get("transcript", "No transcript available."),
-            height=180,
-            disabled=True,
-            label_visibility="collapsed",
-        )
-        st.markdown('<div class="section-title">Clinical Summary</div>', unsafe_allow_html=True)
-        st.text_area(
-            "Edit clinical summary",
-            key="edit_summary",
-            value=st.session_state.get("edit_summary", record.get("summary", "")),
-            height=220,
-            label_visibility="collapsed",
-        )
-
-    with col_right:
+    if not record:
+        go_to("dashboard"); st.rerun(); return
+    is_approved = record.get("status") == "Approved"
+    back, title, status = st.columns([1.15, 6.85, 2], vertical_alignment="center")
+    if back.button("Back", key="review_back", use_container_width=True):
+        go_to("dashboard"); st.rerun()
+    title.markdown(f'<div class="page-heading">{escape(record.get("name", ""))}</div><div class="page-kicker">{escape(record.get("id", ""))} · {escape(str(record.get("age", "")))}y · {escape(record.get("gender", ""))} · {escape(record.get("doctor", "N/A"))}</div>', unsafe_allow_html=True)
+    status.markdown(render_status_badge(record.get("status", "Pending")), unsafe_allow_html=True)
+    if st.session_state.last_record_id != record.get("id"):
+        st.session_state.edit_summary = record.get("summary") or record.get("patient_summary", "")
+        st.session_state.last_record_id = record.get("id")
+    left, right = st.columns([6.2, 3.8], gap="large")
+    with left:
         with st.container(border=True):
-            st.markdown('<div class="section-title">Clinical Intelligence</div><div class="section-subtitle">Detected relationships and insights</div>', unsafe_allow_html=True)
-            insights = st.session_state.get("detected_insights", [])
-            render_clinical_graph(record.get("name", "Patient"), insights)
-            st.markdown('<div class="insight-heading">Detected Insights</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Transcript</div><div class="section-subtitle">Source conversation used for analysis</div>', unsafe_allow_html=True)
+            with st.expander("View source conversation", expanded=True):
+                st.text_area("Transcript", value=record.get("transcript", "No transcript available."), height=150, disabled=True, label_visibility="collapsed")
+
+            soap_col, cds_col = st.columns(2)
+            with soap_col:
+                if not is_approved and st.button("Generate SOAP", type="primary", use_container_width=True, disabled=not record.get("transcript", "").strip()):
+                    try:
+                        with st.spinner("Generating SOAP note..."):
+                            regenerated = HealthcareApiClient().regenerate_encounter(record["transcript"])
+                        record["summary"] = regenerated.get("soap_note") or regenerated.get("patient_summary", "")
+                        record["patient_summary"] = regenerated.get("patient_summary", "")
+                        record["key_highlights"] = regenerated.get("key_highlights", [])
+                        record["transcript"] = regenerated.get("transcript", record.get("transcript", ""))
+                        for index, existing in enumerate(st.session_state.records):
+                            if existing.get("id") == record.get("id"):
+                                st.session_state.records[index] = record
+                                break
+                        save_db(st.session_state.records)
+                        st.session_state.edit_summary = record["summary"]
+                        st.success("SOAP note generated from the stored transcript.")
+                        st.rerun()
+                    except (RuntimeError, requests.exceptions.HTTPError) as error:
+                        st.error(f"SOAP regeneration failed: {error}")
+            with cds_col:
+                if not is_approved and st.button("Generate CDS", type="secondary", use_container_width=True, disabled=not record.get("transcript", "").strip()):
+                    try:
+                        with st.spinner("Generating CDS recommendations..."):
+                            regenerated = HealthcareApiClient().regenerate_cds(record)
+                        recommendations = regenerated.get("recommendations")
+                        if not recommendations or not str(recommendations).strip():
+                            raise RuntimeError("The CDS service returned no recommendation. The existing recommendation was kept.")
+                        record["retrieved_guidelines"] = regenerated.get("retrieved_guidelines", record.get("retrieved_guidelines", ""))
+                        record["recommendations"] = recommendations
+                        record["cds_requested"] = True
+                        record["analysis_version"] = ANALYSIS_VERSION
+                        for index, existing in enumerate(st.session_state.records):
+                            if existing.get("id") == record.get("id"):
+                                st.session_state.records[index] = record
+                                break
+                        save_db(st.session_state.records)
+                        st.success("CDS recommendations generated.")
+                        st.rerun()
+                    except (RuntimeError, requests.exceptions.HTTPError) as error:
+                        st.error(f"CDS regeneration failed: {error}")
+        with st.container(border=True):
+            st.markdown('<div class="section-title">Clinical Decision Support Recommendations</div><div class="section-subtitle">Evidence-based guidance for this encounter</div>', unsafe_allow_html=True)
+            render_cds_recommendations(record.get("recommendations") or "Review the documented encounter and follow up based on clinical judgment.")
+        with st.container(border=True):
+            st.markdown('<div class="section-title">Relationship Graph</div><div class="section-subtitle">Clinical relationships detected in this encounter</div>', unsafe_allow_html=True)
+            render_clinical_graph(record.get("name", "Patient"), st.session_state.detected_insights)
+    with right:
+        with st.container(border=True):
+            subtitle = "Approved and locked" if is_approved else "Editable encounter summary"
+            st.markdown(f'<div class="section-title">SOAP Note</div><div class="section-subtitle">{subtitle}</div>', unsafe_allow_html=True)
+            render_summary(st.session_state.edit_summary)
+            if not is_approved:
+                with st.expander("Review and edit summary", expanded=False): st.text_area("Edit clinical summary", key="edit_summary", height=220, label_visibility="collapsed")
+        with st.container(border=True):
+            st.markdown('<div class="section-title">Detected Insights</div><div class="section-subtitle">Grouped clinical signals</div>', unsafe_allow_html=True)
+            insights = st.session_state.detected_insights
             if insights:
-                for insight in insights:
-                    render_insight_chip(insight)
+                render_grouped_insights(insights)
             else:
                 st.caption("No insights detected in this transcript.")
-
-            if record.get("cds_requested", False) and is_current_analysis:
-                st.markdown('<div class="section-title">CDS Recommendations</div>', unsafe_allow_html=True)
-                st.write(record.get("recommendations", "Not available"))
-
-            def add_insight_field():
-                if st.session_state.insight_count < 6: st.session_state.insight_count += 1
-
-            def push_to_summary():
-                selected_insights = [st.session_state.get(f"insight_{i}", "") for i in range(st.session_state.insight_count)]
-                st.session_state.edit_summary = append_selected_insights_to_note(
-                    st.session_state.edit_summary,
-                    selected_insights,
-                )
-                st.session_state.insight_count = 1
-
-            st.markdown('<div class="insight-heading">Add Clinical Insight</div>', unsafe_allow_html=True)
-            for i in range(st.session_state.insight_count):
-                default_idx = 0
-                if i < len(st.session_state.detected_insights):
-                    auto_val = st.session_state.detected_insights[i]
-                    if auto_val in master_insights_list: default_idx = master_insights_list.index(auto_val)
-                st.selectbox(f"Insight {i+1}", master_insights_list, index=default_idx, key=f"insight_{i}", label_visibility="collapsed")
-
-            c1, c2 = st.columns(2)
-            c1.button("Add Clinical Insight", on_click=add_insight_field, use_container_width=True)
-            c2.button("Push to Note", type="primary", on_click=push_to_summary, use_container_width=True)
-
-    edited_df = render_transcript(record)
-
-    st.write("---")
-
-    def finalize_note():
-        record['summary'] = st.session_state.edit_summary
-        record['transcript_data'] = edited_df.to_dict('records')
-        record['status'] = "Approved"
-        # Stamp it with today's actual date when approved
-        record['approval_date'] = datetime.now().strftime("%d/%m/%Y")
-        for i, r in enumerate(st.session_state.records):
-            if r['id'] == record['id']: st.session_state.records[i] = record; break
+            st.caption("ICD-10 and CPT/HCPCS suggestions are available on the Codes page.")
+            if st.button("Open Codes", key="review_open_codes", use_container_width=True):
+                go_to("codes"); st.rerun()
+        if not is_approved:
+            with st.container(border=True):
+                st.markdown('<div class="insight-heading">Add Clinical Insight</div>', unsafe_allow_html=True)
+                for index in range(st.session_state.insight_count): st.selectbox(f"Insight {index + 1}", MASTER_INSIGHTS, key=f"insight_{index}", label_visibility="collapsed")
+                add_col, push_col = st.columns(2)
+                if add_col.button("Add Insight", use_container_width=True, disabled=st.session_state.insight_count >= 6):
+                    st.session_state.insight_count += 1; st.rerun()
+                def push_selected_insights_to_note():
+                    selected = [st.session_state.get(f"insight_{i}", "") for i in range(st.session_state.insight_count)]
+                    manual_insights = record.setdefault("manual_insights", [])
+                    for insight in selected:
+                        if insight != "None" and insight not in manual_insights:
+                            manual_insights.append(insight)
+                    st.session_state.edit_summary = append_selected_insights_to_note(st.session_state.edit_summary, selected)
+                    st.session_state.detected_insights = get_record_insights(record)
+                    for index, existing in enumerate(st.session_state.records):
+                        if existing.get("id") == record.get("id"):
+                            st.session_state.records[index] = record
+                            break
+                    save_db(st.session_state.records)
+                    st.session_state.insight_count = 1
+                push_col.button("Push to Note", type="primary", use_container_width=True, on_click=push_selected_insights_to_note)
+    edited_df = render_transcript(record, read_only=is_approved)
+    def persist(approved=False):
+        if record.get("status") == "Approved":
+            return
+        record["summary"] = st.session_state.edit_summary
+        record["transcript_data"] = edited_df.to_dict("records")
+        if approved:
+            record["status"] = "Approved"
+            record["approval_date"] = datetime.now().strftime("%d/%m/%Y")
+        for index, existing in enumerate(st.session_state.records):
+            if existing.get("id") == record.get("id"):
+                st.session_state.records[index] = record; break
         save_db(st.session_state.records)
-        st.session_state.page = "dashboard"
+    if record.get("status") == "Pending":
+        st.divider()
+        _, draft_col, final_col = st.columns([7, 1.5, 1.5], vertical_alignment="center")
+        if draft_col.button("Save Draft", use_container_width=True): persist(False); st.success("Draft and audit trail updated.")
+        if final_col.button("Finalize Note", type="primary", use_container_width=True): persist(True); go_to("dashboard"); st.rerun()
 
-    def save_draft():
-        record['summary'] = st.session_state.edit_summary
-        record['transcript_data'] = edited_df.to_dict('records')
-        for i, r in enumerate(st.session_state.records):
-            if r['id'] == record['id']: st.session_state.records[i] = record; break
-        save_db(st.session_state.records)
-        st.success("Draft & Audit Trail Updated!")
-
-    c1, c2, c3 = st.columns([7, 1.5, 1.5])
-    if record.get('status') == "Pending":
-        c2.button("Save Draft", on_click=save_draft, use_container_width=True)
-        c3.button("Finalize Note", type="primary", on_click=finalize_note, use_container_width=True)
-    else:
-        c3.button("Update Record", type="primary", on_click=save_draft, use_container_width=True)
 
 # ============================================================
-# ROUTER
+# 8. CODES PAGE
 # ============================================================
-if st.session_state.page == "dashboard": show_dashboard()
-elif st.session_state.page == "new_consult": show_new_consultation()
-elif st.session_state.page == "review": show_review_note()
+def show_codes():
+    render_sidebar("codes")
+    render_header("Codes", "ICD-10 diagnosis and CPT/HCPCS procedure code suggestions")
+
+    records = st.session_state.records
+    if not records:
+        st.info("No patient encounters are available. Create a consultation before generating codes.")
+        return
+
+    record_lookup = {f'{r.get("name", "Unknown")} · {r.get("id", "No ID")}': r for r in records}
+    current = st.session_state.current_record
+    default_label = next((label for label, value in record_lookup.items() if current and value.get("id") == current.get("id")), list(record_lookup)[0])
+    labels = list(record_lookup)
+    selected_label = st.selectbox("Select patient encounter", labels, index=labels.index(default_label))
+    record = record_lookup[selected_label]
+
+    if not current or current.get("id") != record.get("id"):
+        st.session_state.current_record = record
+        st.session_state.detected_insights = get_record_insights(record)
+
+    insights = get_record_insights(record)
+    st.session_state.detected_insights = insights
+
+    st.markdown(
+        f'<div class="code-hero"><div class="code-hero-title">Medical Coding Workspace</div>'
+        f'<div class="code-hero-text">Review machine-suggested codes before adding them to the clinical or billing workflow.</div>'
+        f'<div class="code-patient"><b>{escape(record.get("name", ""))}</b> · {escape(record.get("id", ""))} · '
+        f'{escape(str(record.get("age", "")))}y · {escape(record.get("gender", ""))} · {escape(record.get("doctor", "N/A"))}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        st.markdown('<div class="section-title">Detected Clinical Context</div><div class="section-subtitle">Items used to identify candidate codes</div>', unsafe_allow_html=True)
+        if insights:
+            render_grouped_insights(insights)
+        else:
+            st.warning("No codable insights were detected in this encounter transcript.")
+
+        generate_col, review_col = st.columns([1, 1])
+        if generate_col.button("Regenerate Code Suggestions", type="primary", use_container_width=True, disabled=not insights):
+            with st.spinner("Matching ICD-10 and CPT/HCPCS codes..."):
+                st.session_state.code_results = get_backend_code_suggestions(insights, record.get("transcript", ""))
+                st.session_state.code_record_id = record.get("id")
+                st.session_state.code_results_signature = tuple(insights)
+                st.session_state.code_matcher_version = CODE_MATCHER_VERSION
+            st.rerun()
+        if review_col.button("Return to Clinical Review", use_container_width=True):
+            go_to("review"); st.rerun()
+
+    current_signature = tuple(insights)
+    cached_results_are_stale = (
+        st.session_state.code_record_id != record.get("id")
+        or st.session_state.code_results_signature != current_signature
+        or st.session_state.code_matcher_version != CODE_MATCHER_VERSION
+    )
+    if cached_results_are_stale:
+        with st.spinner("Matching ICD-10 and CPT/HCPCS codes..."):
+            st.session_state.code_results = get_backend_code_suggestions(insights, record.get("transcript", ""))
+        st.session_state.code_record_id = record.get("id")
+        st.session_state.code_results_signature = current_signature
+        st.session_state.code_matcher_version = CODE_MATCHER_VERSION
+
+    code_results = st.session_state.code_results
+    code_error = st.session_state.get("code_generation_error", "")
+    if code_error:
+        st.warning(code_error)
+    elif st.session_state.code_record_id == record.get("id"):
+        total_matches = len(code_results.get("icd10", [])) + len(code_results.get("cpt", []))
+        st.success(f"Code matching completed. {total_matches} suggestion(s) found.")
+
+    icd_tab, cpt_tab = st.tabs(["ICD-10 Diagnosis Codes", "CPT/HCPCS Procedure Codes"])
+    with icd_tab:
+        with st.container(border=True):
+            st.markdown('<div class="section-title">Suggested ICD-10 Codes</div><div class="section-subtitle">Diagnosis code candidates based on detected diagnoses and symptoms</div>', unsafe_allow_html=True)
+            render_code_results(code_results.get("icd10", []), "No ICD-10 suggestions are available. Generate codes or verify that code_matcher is configured.")
+    with cpt_tab:
+        with st.container(border=True):
+            st.markdown('<div class="section-title">CPT/HCPCS Billing Lines</div><div class="section-subtitle">Review date, code, quantity, and chargemaster rate before billing</div>', unsafe_allow_html=True)
+            cpt_rows = build_cpt_bill_rows(code_results.get("cpt", []), record.get("date"))
+            render_code_results(cpt_rows, "No CPT/HCPCS suggestions are available. Generate codes or verify that code_matcher is configured.")
+
+    st.caption("Coding suggestions require professional validation before billing, claim submission, or addition to the legal health record.")
+
+
+# ============================================================
+# 9. ROUTER
+# ============================================================
+if st.session_state.page == "dashboard":
+    show_dashboard()
+elif st.session_state.page == "new_consult":
+    show_new_consultation()
+elif st.session_state.page == "review":
+    show_review_note()
+elif st.session_state.page == "codes":
+    show_codes()
+else:
+    st.session_state.page = "dashboard"
+    st.rerun()

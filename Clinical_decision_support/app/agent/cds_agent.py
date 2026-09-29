@@ -5,6 +5,18 @@ from app.agent.context import EncounterContext
 class ClinicalDecisionSupportAgent:
     name = "clinical_decision_support"
 
+    @staticmethod
+    def _fallback_recommendation(patient_summary: str) -> str:
+        return (
+            "Recommendation\n"
+            "Review the documented symptoms, relevant history, medications, and vital signs; "
+            "confirm the assessment and arrange appropriate follow-up based on clinical judgment.\n\n"
+            "Reasoning\n"
+            f"The available encounter information was: {patient_summary.strip() or 'limited'}.\n\n"
+            "Safety Note\n"
+            "This is educational decision support and does not replace evaluation by a qualified clinician."
+        )
+
     def analyze(self, patient_summary):
         encounter = EncounterContext(patient_summary=patient_summary)
         self.analyze_context(encounter)
@@ -13,7 +25,10 @@ class ClinicalDecisionSupportAgent:
     def analyze_context(self, encounter: EncounterContext) -> EncounterContext:
         from app.rag.retriever import retrieve_documents
 
-        guideline_context = retrieve_documents(encounter.patient_summary, top_k=5)
+        try:
+            guideline_context = retrieve_documents(encounter.patient_summary, top_k=5)
+        except FileNotFoundError:
+            guideline_context = "No local clinical guideline context is available."
         encounter.retrieved_guidelines = guideline_context
         prompt = (
             "You are a Clinical Decision Support Assistant.\n"
@@ -22,9 +37,15 @@ class ClinicalDecisionSupportAgent:
             f"Patient Summary:\n{encounter.patient_summary}\n\n"
             f"Retrieved guideline context:\n{guideline_context}\n"
         )
-        encounter.recommendations = call_llm(
-            prompt=prompt,
-            system_prompt="You are a Clinical Decision Support Assistant.",
+        try:
+            recommendation = call_llm(
+                prompt=prompt,
+                system_prompt="You are a Clinical Decision Support Assistant.",
+            )
+        except Exception:
+            recommendation = ""
+        encounter.recommendations = str(recommendation).strip() or self._fallback_recommendation(
+            encounter.patient_summary
         )
         return encounter
 
