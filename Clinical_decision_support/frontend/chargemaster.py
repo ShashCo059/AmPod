@@ -10,6 +10,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 SUPPORTED_FILES = (
+    PROJECT_ROOT.parent / "Original_Hospital_IPD_OPD_Charges_200_Demo.xlsx",
     DATA_DIR / "chargemaster.csv",
     DATA_DIR / "chargemaster.xlsx",
     DATA_DIR / "Demo_Hospital_Chargemaster_CDM.xlsx",
@@ -35,18 +36,43 @@ def _read_source(source: Path) -> pd.DataFrame:
     if source.suffix.lower() == ".csv":
         return pd.read_csv(source, dtype=str)
 
-    preview = pd.read_excel(source, sheet_name="CDM Master", header=None, dtype=str)
-    header_index = next(
-        (
-            index
-            for index, row in preview.iterrows()
-            if any("cpt/hcpcs" in str(value).lower() for value in row.tolist())
-        ),
-        None,
-    )
-    if header_index is None:
-        raise ValueError("Chargemaster workbook does not contain a CPT/HCPCS header.")
-    return pd.read_excel(source, sheet_name="CDM Master", header=header_index, dtype=str)
+    workbook = pd.ExcelFile(source)
+    preferred_sheets = [
+        name for name in ("OPD Charges", "CDM Master") if name in workbook.sheet_names
+    ]
+    sheet_names = preferred_sheets + [
+        name for name in workbook.sheet_names if name not in preferred_sheets
+    ]
+    fallback = None
+    for sheet_name in sheet_names:
+        preview = pd.read_excel(source, sheet_name=sheet_name, header=None, dtype=str)
+        header_index = next(
+            (
+                index
+                for index, row in preview.iterrows()
+                if any("cpt/hcpcs" in str(value).lower() for value in row.tolist())
+            ),
+            None,
+        )
+        if header_index is None:
+            continue
+        frame = pd.read_excel(source, sheet_name=sheet_name, header=header_index, dtype=str)
+        columns = _normalized_columns(frame)
+        code_column = _find_column(
+            columns,
+            ("cpt", "cptcode", "hcpcs", "hcpcscode", "cpthcpcs", "procedurecode", "code"),
+        )
+        if code_column is None:
+            continue
+        if fallback is None:
+            fallback = frame
+        if frame[code_column].fillna("").astype(str).str.match(
+            r"^(?:\d{5}|[A-Z]\d{4})$", case=False
+        ).any():
+            return frame
+    if fallback is not None:
+        return fallback
+    raise ValueError("Chargemaster workbook does not contain a CPT/HCPCS header.")
 
 
 def load_chargemaster() -> pd.DataFrame:
@@ -58,7 +84,7 @@ def load_chargemaster() -> pd.DataFrame:
     frame = _read_source(source)
     columns = _normalized_columns(frame)
     code_column = _find_column(columns, ("cpt", "cptcode", "hcpcs", "hcpcscode", "cpthcpcs", "procedurecode", "code"))
-    rate_column = _find_column(columns, ("rate", "charge", "standardcharge", "grossunitcharge", "unitprice", "price", "amount"))
+    rate_column = _find_column(columns, ("rate", "charge", "standardcharge", "grossunitcharge", "unitcharge", "unitprice", "price", "amount"))
     quantity_column = _find_column(columns, ("quantity", "qty", "quantityunit", "units", "unit", "unitbasis"))
     date_column = _find_column(columns, ("date", "servicedate", "effectivedate"))
 

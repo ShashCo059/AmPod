@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +38,29 @@ class CodingRequest(BaseModel):
 class CodingResponse(BaseModel):
     icd10: list[dict[str, Any]] = Field(default_factory=list)
     cpt: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PatientCreateRequest(BaseModel):
+    values: dict[str, Any]
+
+
+class PatientUpdateRequest(BaseModel):
+    values: dict[str, Any]
+
+
+class PatientRecordsRequest(BaseModel):
+    records: list[dict[str, Any]]
+
+
+class PatientRecordCreateRequest(BaseModel):
+    values: dict[str, Any]
+
+
+class GenerateBillRequest(BaseModel):
+    icd10_codes: list[str] = Field(default_factory=list)
+    cpt_hcpcs_codes: list[str] = Field(default_factory=list)
+    encounter_id: str | None = None
+    encounter_type: Literal["Inpatient", "Outpatient"] = "Outpatient"
 
 
 class EncounterRequest(BaseModel):

@@ -9,13 +9,29 @@ from app.api.schemas import (
     EncounterResponse,
     CodingRequest,
     CodingResponse,
+    GenerateBillRequest,
     KnowledgeBaseRequest,
     KnowledgeBaseResponse,
+    PatientCreateRequest,
+    PatientRecordCreateRequest,
+    PatientRecordsRequest,
+    PatientUpdateRequest,
     PatientAnalysisRequest,
     PatientAnalysisResponse,
 )
 from app.agent.encounter_agent import EncounterAgent
 from app.services.clinical_service import ClinicalAnalysisService
+from app.services.billing_service import generate_patient_bill, save_generated_bill
+from app.services.ehr_data_service import (
+    create_patient,
+    create_patient_record,
+    delete_patient,
+    get_patient_chart,
+    load_ehr_data,
+    list_patients,
+    replace_patient_records,
+    update_patient,
+)
 from cpt_coder import get_cpt_candidate_sets, get_cpt_codes, infer_documented_procedures
 from icd10_coder import get_icd10_codes
 
@@ -47,6 +63,108 @@ def root():
 @router.get("/health", tags=["system"])
 def health_check():
     return {"status": "ok"}
+
+
+@router.get("/patients", tags=["patients"])
+def get_patients():
+    try:
+        return {"patients": list_patients()}
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=500, detail=f"Patient data could not be loaded: {error}") from error
+
+
+@router.get("/patients/export", tags=["patients"])
+def export_patient_data():
+    try:
+        return load_ehr_data()
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=500, detail=f"Patient data could not be loaded: {error}") from error
+
+
+@router.get("/patients/{patient_id}", tags=["patients"])
+def get_patient(patient_id: str):
+    try:
+        return get_patient_chart(patient_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=500, detail=f"Patient chart could not be loaded: {error}") from error
+
+
+@router.post("/patients", tags=["patients"])
+def add_patient(request: PatientCreateRequest):
+    try:
+        return create_patient(request.values)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=500, detail=f"Patient could not be saved: {error}") from error
+
+
+@router.put("/patients/{patient_id}", tags=["patients"])
+def edit_patient(patient_id: str, request: PatientUpdateRequest):
+    try:
+        return update_patient(patient_id, request.values)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Patient could not be saved: {error}") from error
+
+
+@router.put("/patients/{patient_id}/records/{sheet_name}", tags=["patients"])
+def edit_patient_records(patient_id: str, sheet_name: str, request: PatientRecordsRequest):
+    try:
+        return {"records": replace_patient_records(patient_id, sheet_name, request.records)}
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Patient records could not be saved: {error}") from error
+
+
+@router.post("/patients/{patient_id}/records/{sheet_name}", tags=["patients"])
+def add_patient_record(patient_id: str, sheet_name: str, request: PatientRecordCreateRequest):
+    try:
+        return create_patient_record(patient_id, sheet_name, request.values)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Patient record could not be saved: {error}") from error
+
+
+@router.delete("/patients/{patient_id}", tags=["patients"])
+def remove_patient(patient_id: str):
+    try:
+        delete_patient(patient_id)
+        return {"deleted": True, "patient_id": patient_id}
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Patient could not be deleted: {error}") from error
+
+
+@router.post("/patients/{patient_id}/bills/ipd", tags=["billing"])
+def generate_patient_ipd_bill(patient_id: str, request: GenerateBillRequest):
+    try:
+        bill = generate_patient_bill(
+            patient_id,
+            icd10_codes=request.icd10_codes,
+            cpt_hcpcs_codes=request.cpt_hcpcs_codes,
+            encounter_id=request.encounter_id,
+            encounter_type=request.encounter_type,
+        )
+        return save_generated_bill(bill)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Patient not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (OSError, ImportError) as error:
+        raise HTTPException(status_code=503, detail=f"IPD bill source is unavailable: {error}") from error
 
 
 @router.post("/analyze", response_model=PatientAnalysisResponse, tags=["clinical"])

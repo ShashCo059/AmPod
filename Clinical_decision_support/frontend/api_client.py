@@ -66,6 +66,87 @@ class HealthcareApiClient:
         response.raise_for_status()
         return response.json()
 
+    def list_patients(self) -> list[dict]:
+        return self._request_json("GET", "/patients").get("patients", [])
+
+    def export_patient_data(self) -> dict:
+        return self._request_json("GET", "/patients/export")
+
+    def get_patient_chart(self, patient_id: str) -> dict:
+        return self._request_json("GET", f"/patients/{patient_id}")
+
+    def create_patient(self, values: dict) -> dict:
+        return self._request_json("POST", "/patients", {"values": values})
+
+    def update_patient(self, patient_id: str, values: dict) -> dict:
+        return self._request_json("PUT", f"/patients/{patient_id}", {"values": values})
+
+    def replace_patient_records(self, patient_id: str, sheet_name: str, records: list[dict]) -> dict:
+        return self._request_json(
+            "PUT",
+            f"/patients/{patient_id}/records/{sheet_name}",
+            {"records": records},
+        )
+
+    def create_patient_record(self, patient_id: str, sheet_name: str, values: dict) -> dict:
+        return self._request_json(
+            "POST",
+            f"/patients/{patient_id}/records/{sheet_name}",
+            {"values": values},
+        )
+
+    def delete_patient(self, patient_id: str) -> dict:
+        return self._request_json("DELETE", f"/patients/{patient_id}")
+
+    def generate_patient_bill(
+        self,
+        patient_id: str,
+        icd10_codes: list[str],
+        cpt_hcpcs_codes: list[str],
+        encounter_id: str | None = None,
+        encounter_type: str = "Outpatient",
+    ) -> dict:
+        return self._request_json(
+            "POST",
+            f"/patients/{patient_id}/bills/ipd",
+            {
+                "icd10_codes": icd10_codes,
+                "cpt_hcpcs_codes": cpt_hcpcs_codes,
+                "encounter_id": encounter_id,
+                "encounter_type": encounter_type,
+            },
+        )
+
+    def _request_json(self, method: str, endpoint: str, payload: dict | None = None) -> dict:
+        try:
+            response = requests.request(
+                method,
+                f"{self.base_url}{endpoint}",
+                json=payload,
+                timeout=60,
+            )
+        except requests.exceptions.ConnectionError as error:
+            raise RuntimeError(f"Cannot connect to the FastAPI backend at {self.base_url}.") from error
+        except requests.exceptions.Timeout as error:
+            raise RuntimeError(f"The FastAPI backend timed out while requesting {endpoint}.") from error
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as error:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                try:
+                    response.raise_for_status()
+                except requests.exceptions.HTTPError as error:
+                    try:
+                        detail = response.json().get("detail")
+                    except (ValueError, AttributeError):
+                        detail = None
+                    message = str(detail) if detail else f"Backend returned HTTP {response.status_code} for {endpoint}."
+                    raise RuntimeError(message) from error
+            raise RuntimeError(message) from error
+        return response.json()
+
     def _post_encounter(self, endpoint: str, transcript: str, include_cds: bool) -> dict:
         try:
             response = requests.post(
