@@ -21,7 +21,11 @@ from app.api.schemas import (
 )
 from app.agent.encounter_agent import EncounterAgent
 from app.services.clinical_service import ClinicalAnalysisService
-from app.services.billing_service import generate_patient_bill, save_generated_bill
+from app.services.billing_service import (
+    DuplicateBillError,
+    generate_patient_bill,
+    save_generated_bill,
+)
 from app.services.ehr_data_service import (
     create_patient,
     create_patient_record,
@@ -151,14 +155,18 @@ def remove_patient(patient_id: str):
 @router.post("/patients/{patient_id}/bills/ipd", tags=["billing"])
 def generate_patient_ipd_bill(patient_id: str, request: GenerateBillRequest):
     try:
-        bill = generate_patient_bill(
-            patient_id,
-            icd10_codes=request.icd10_codes,
-            cpt_hcpcs_codes=request.cpt_hcpcs_codes,
-            encounter_id=request.encounter_id,
-            encounter_type=request.encounter_type,
-        )
+        bill_options = {
+            "icd10_codes": request.icd10_codes,
+            "cpt_hcpcs_codes": request.cpt_hcpcs_codes,
+            "encounter_id": request.encounter_id,
+            "encounter_type": request.encounter_type,
+        }
+        if request.payer_name is not None:
+            bill_options["payer_name"] = request.payer_name
+        bill = generate_patient_bill(patient_id, **bill_options)
         return save_generated_bill(bill)
+    except DuplicateBillError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Patient not found.") from error
     except ValueError as error:

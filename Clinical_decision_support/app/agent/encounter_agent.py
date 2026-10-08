@@ -26,7 +26,21 @@ class EncounterAgent:
 
     def process(self, transcript: str) -> EncounterContext:
         context = self.prepare(transcript)
-        context = self.cds.analyze_context(context)
+        try:
+            context = self.cds.analyze_context(context)
+            context.metadata["cds_generation_status"] = "generated"
+        except (
+            ConnectionError,
+            FileNotFoundError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            context.recommendations = ""
+            context.metadata["cds_generation_status"] = "unavailable"
+            context.metadata["cds_generation_error"] = str(error)
         context.metadata["agents_invoked"] = [self.scribe.name, self.cds.name]
         return context
 

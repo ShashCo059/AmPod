@@ -1,126 +1,330 @@
-# Clinical Decision Support and Ambient Scribe
+# NuuCare Clinical Scribe, EHR Demo, and Billing
 
-A local clinical documentation and decision-support prototype. The application records or accepts a clinical conversation, creates a structured encounter note with an LLM, retrieves relevant guidance from a local PDF knowledge base, and generates clinical decision-support recommendations.
+This project is a local demonstration application for recording a synthetic
+clinical encounter, drafting a SOAP note, requesting evidence-grounded clinical
+decision support (CDS), reviewing diagnosis/procedure code suggestions, browsing
+synthetic EHR records, and generating a draft hospital bill.
 
-> This is an educational prototype. It is not a medical device and must not replace a licensed clinician, emergency services, local protocols, or professional clinical judgment.
+> **Educational demonstration only.** This is not a production EHR, medical
+> device, insurance eligibility system, coding authority, or substitute for
+> licensed clinical judgment, emergency services, or local protocols. Do not
+> enter real patient information (PHI). The microphone workflow sends audio to
+> Google's speech-recognition service; clinical text is sent to the configured
+> Coforge LLM service.
 
-## What The Application Does
+## Contents
 
-1. A clinician opens the Streamlit interface.
-2. The clinician enters patient and doctor details and records audio.
-3. Streamlit transcribes the audio locally with SpeechRecognition and Google speech recognition.
-4. The transcript is sent to the FastAPI `/encounters/scribe` endpoint.
-5. The ambient scribe agent calls the configured Coforge LLM and converts the transcript into structured encounter fields.
-6. The clinician can request CDS recommendations.
-7. The CDS agent retrieves relevant chunks from the local knowledge base using TF-IDF similarity and ChromaDB storage.
-8. The CDS agent sends the patient summary and retrieved guidance to the LLM.
-9. The UI displays the transcript, summary, recommendations, and detected insights.
-10. The clinician can save a draft or finalize the note in `clinical_records.json`.
+- [Application at a glance](#application-at-a-glance)
+- [Current user flow](#current-user-flow)
+- [Billing and payer behavior](#billing-and-payer-behavior)
+- [Data and persistence](#data-and-persistence)
+- [Setup](#setup)
+- [Run the application](#run-the-application)
+- [API reference](#api-reference)
+- [Knowledge base and CDS evidence](#knowledge-base-and-cds-evidence)
+- [Tests](#tests)
+- [Troubleshooting](#troubleshooting)
+- [Project map](#project-map)
+- [Changes represented in the current implementation](#changes-represented-in-the-current-implementation)
+- [Limitations and safety](#limitations-and-safety)
 
-## Architecture
+## Application at a glance
+
+The application has one FastAPI backend and two Streamlit frontends:
+
+| Component | Default address | Entry point | Intended use |
+| --- | --- | --- | --- |
+| FastAPI backend | `http://127.0.0.1:8001` | `python -m app` | Shared clinical, EHR, coding, and billing API |
+| Original Streamlit UI | `http://127.0.0.1:8502` | `frontend/streamlit_app.py` | Original consultation and clinical workflow |
+| Athena Streamlit UI | `http://127.0.0.1:8503` | `frontend/streamlit1_app.py` | Current EHR and Athena billing workflow |
+
+The current workflow is on port **8503**. It uses the shared backend and the
+Athena charge rows. The 8502 frontend remains available for the original
+consultation workflow.
 
 ```text
-Streamlit UI
-  frontend/streamlit_app.py
-        |
-        v
-frontend/api_client.py
-        |
-        | HTTP JSON requests to http://127.0.0.1:8000
-        v
-FastAPI application
-  app/main.py + app/api/routes.py
-        |
-        +--> AmbientScribeAgent --> SoapService --> Coforge LLM API
-        |
-        +--> ClinicalDecisionSupportAgent
-                  |
-                  +--> TF-IDF retrieval + ChromaDB
-                  +--> Coforge LLM API
-        |
-        +--> clinical_records.json
+Browser
+  ├── Streamlit UI (8502 or 8503)
+  │     ├── local clinical_records.json for consultation workspaces
+  │     └── HealthcareApiClient
+  └── FastAPI backend (8001)
+        ├── EHR JSON read/write
+        ├── ICD-10 and CPT/HCPCS suggestions
+        ├── synthetic charge-sheet billing
+        └── encounter agents
+              ├── ambient scribe → Coforge LLM
+              └── CDS → local knowledge retrieval → Coforge LLM
 ```
 
-The application has two processing stages:
+## Current user flow
 
-- **Scribe stage:** transcript to structured clinical encounter data.
-- **CDS stage:** encounter context plus local retrieved guidance to clinical recommendations.
+### 1. Start a consultation
 
-The Streamlit client uses the separate `/encounters/scribe` and `/encounters/cds` calls so the note can be generated before CDS is requested.
+1. Open **New Consultation** and select a synthetic patient from the demo
+   directory, or enter the required details for a new patient.
+2. Record audio in the browser. The Streamlit frontend sends the recording to
+   Google's speech-recognition service and receives a transcript.
+3. The frontend sends the transcript to `POST /encounters/analyze`.
+4. The backend runs the ambient scribe, constructs SOAP fields and a patient
+   summary, retrieves local guidance for CDS, and requests a recommendation.
+5. The frontend lets the user review the transcript, note, highlights, and any
+   CDS result before saving the consultation.
+6. When saving, the frontend creates/links the EHR patient and encounter note
+   through the patient APIs, saves the consultation workspace record to
+   `clinical_records.json`, and opens the review flow.
 
-## Requirements
+Audio transcription requires network access to Google's service. A transcript
+can also be supplied directly through the API; microphone recording is not
+required for API clients.
 
-- Windows, macOS, or Linux
-- Python 3.10 or newer recommended
-- A working microphone for browser recording
-- Internet access for:
-  - Coforge LLM Router API
-  - Google speech recognition used by SpeechRecognition
-- A valid Coforge API key and endpoint
-- Project dependencies from `requirements.txt`
+### 2. SOAP note generation and recovery behavior
 
-## Installation
+The scribe asks the configured LLM to return structured JSON. The backend
+parses the response into an `EncounterContext` and formats the SOAP note from
+its clinical fields.
 
-Run these commands from the `Clinical_decision_support` directory.
+- The combined encounter flow retries scribe generation once after recognized
+  provider, parsing, or response-validation failures.
+- If those attempts fail, it retains the original transcript in a clearly
+  labeled transcript-only note shell. The shell does not invent missing
+  examination findings, diagnoses, medications, or plans. Generation metadata
+  marks this as a fallback and the UI warns the user to review it.
+- **Generate SOAP** on the Review screen reruns the scribe against the stored
+  transcript. It does not replace the transcript with a new recording.
+- A transcript-only fallback is not a completed clinical note and must be
+  reviewed and completed by a qualified clinician before approval.
 
-### 1. Create a virtual environment
+Retries improve recovery from transient or malformed responses; they cannot
+ensure a remote model, network, or provider is always available.
 
-If the repository virtual environment already exists at `D:\Agent pod\venv`, it can be reused. Otherwise create one from the parent directory:
+### 3. CDS generation and evidence
+
+The CDS agent:
+
+1. Builds a retrieval query from the structured encounter and original
+   transcript.
+2. Retrieves relevant text from the local knowledge-base index.
+3. Prompts the LLM to separate documented facts from interpretation, state
+   missing information and uncertainty, and cite retrieved source labels.
+4. Rejects empty output and, when source passages were retrieved, output that
+   cites none of those passages.
+5. Retries an empty or uncited model answer once. If the combined encounter
+   encounters a handled CDS/provider/retrieval failure, it returns the
+   SOAP/transcript result with CDS marked unavailable; it does not substitute
+   generic medical advice.
+
+The Review screen's **Regenerate CDS from Transcript** action retries CDS using
+the saved encounter context. A failed retry is shown as a failure and does not
+overwrite an existing recommendation with generic content. An unavailable
+recommendation is not evidence of a clinically normal result.
+
+The combined request is `POST /encounters/analyze`. Separate API operations are
+also available: `POST /encounters/scribe` for a scribe-only request and
+`POST /encounters/cds` to add CDS to a previously created context. See
+[API reference](#api-reference).
+
+### 4. Review and approve
+
+The Review screen displays the transcript, editable SOAP summary, generated
+CDS, and encounter status. SOAP can be regenerated from the transcript; CDS can
+be regenerated separately. Review generated text and evidence before approval.
+The application stores consultation records locally and stores the linked
+clinical note in the EHR demo JSON.
+
+Reviewers can record an **Accepted** or **Overridden** CDS decision; an
+override requires a rationale. Before/after review events are stored in the
+consultation workspace. These demo events use a generic actor label and are
+not authenticated or tamper-proof audit evidence.
+
+### 5. Generate code suggestions
+
+The **Codes** page derives clinical insights from the transcript and selected
+manual insights, then requests ICD-10-CM and CPT/HCPCS candidates. The matcher
+uses the project's coding data and deterministic mappings for supported common
+terms. Results are suggestions, not final coding decisions.
+
+Review codes before applying them to the billing workflow. Bill generation
+requires a CPT/HCPCS code and confirmation that the displayed services were
+performed and documented for the selected encounter. Do not bill a suggested
+service merely because it appears in a transcript or code list.
+
+### 6. Browse the EHR demo
+
+In the alternate UI, open **EHR Demo Data**:
+
+- The patient selector shows patient ID, name, and assigned payer when present.
+- The selected patient summary shows the primary payer and plan.
+- **Patient Master** includes read-only Primary Payer and Plan columns. Payer
+  values are derived from the active row in the `Insurance` sheet; they are not
+  demographic fields stored on the Patient Master record.
+- Other patient-linked sheets (encounters, notes, insurance, orders, and
+  generated billing data) can be inspected and edited according to the UI's
+  available controls.
+- Adding a patient requires choosing an initial synthetic payer. The backend
+  creates the patient and primary coverage together.
+
+Saving a Patient Master edit does not directly change coverage. Coverage is
+stored in the EHR JSON's `Insurance` sheet.
+
+## Billing and payer behavior
+
+### Eligible patients
+
+In the alternate UI's **Codes** billing section, the patient selector excludes
+the original 50 seed charts (`P100001` through `P100050`). Billing there is
+available for John F. Kennedy (`P100051`), Donald Trump (`P100052`), and
+patients added after them. This restriction applies to that bill-generation
+selector; it does not delete or hide the original 50 charts from the EHR
+directory.
+
+The consultation must be linked to the intended EHR patient and encounter.
+Review and repair patient links before billing; the page intentionally avoids
+silently assuming an ambiguous patient match.
+
+### Select payer and build the bill
+
+1. On **Codes**, select the consultation and confirm the linked patient and
+   encounter.
+2. Review the CPT/HCPCS codes and confirm that the services were performed and
+   documented for that encounter. The patient chart review panel shows the
+   selected encounter and relevant problems, allergies, medications, vitals,
+   labs, and orders. Coding evidence exposes the source transcript and matched
+   candidates.
+   **Physician documentation query** supports a manual neutral query draft,
+   documented clinical indicators, optional response choices, and a saved
+   provider response. Queries remain local to the consultation; they are not
+   sent externally or written into the EHR.
+3. The bill payer is fixed to **Athena Health Insurance**. The payer is shown
+   for both seed and newly added patients; it is not selectable.
+4. Select **Generate Bill**. The backend reads matching Athena `OPD Charges`
+   or `IPD Charges` records from the root-level
+   `Hospital_IPD_OPD_Charges_Athena_Only_Expanded.json`, based on the encounter
+   type. It prices encounter-linked procedures and the reviewed code list from
+   that source only, and creates a new bill with a new bill ID.
+5. The generated bill is saved as a draft with its bill lines and draft claim
+   rows. It displays gross charges, Athena expected allowed amount, estimated
+   patient responsibility, and the hospital account.
+6. **Validate Bill** checks that the bill matches the selected patient,
+   encounter, and payer, that it has priced lines, and that line gross charges
+   add up to the bill total. Validation does **not** submit a claim and does
+   **not** assign or change payer coverage.
+7. On successful bill saving, Athena is written to the patient's active
+   synthetic primary coverage in the `Insurance` sheet. Existing historical
+   bills keep their original payer as an audit record.
+
+> **Important:** Payer coverage assignment happens when the bill is **generated
+> and saved**, not when it is validated. For a bill created before payer
+> persistence was added, generate/save a bill with the intended payer to
+> synchronize the patient coverage. A validation click alone cannot do that.
+
+### What billing does—and does not—mean
+
+- Gross charge rates and Athena allowed/patient-share amounts are synthetic
+  estimates from the hospital charge sheet.
+- If any code lacks a rate in the selected encounter type's Athena-only JSON
+  records, bill generation fails without saving a partial bill. It is never
+  priced using an unrelated CPT code or another payer's data.
+- A generated bill is a local draft. Draft claim rows are not submitted to an
+  insurer.
+- No payer eligibility, member identity, benefits, authorization, adjudication,
+  payment, or real claim submission is performed.
+- A complete bill already present for the same patient, encounter, payer, and
+  CPT set is rejected with HTTP 409. A process-local write lock protects the
+  JSON check-and-save from concurrent requests in this backend process.
+- The hospital account is tied to the encounter and reused when that
+  encounter is billed.
+- Historical generated bills retain the payer and rates used at creation.
+
+## Data and persistence
+
+The backend resolves demo data paths from the repository, not the shell's
+current directory.
+
+| Data | Location | Purpose |
+| --- | --- | --- |
+| Current EHR workbook-as-JSON | `../Epic_Inspired_USA_50_Patient_Demo_25_Athena_25_Care_Gap.json` relative to this README | Patient, Athena active insurance, encounters, notes, orders, bills, lines, claims, and append-only demo edit log |
+| Original demo EHR JSON | `../Epic_Inspired_USA_50_Patient_Demo.json` | Original demo dataset used by older workflows/artifacts |
+| Athena rate source | `../Hospital_IPD_OPD_Charges_Athena_Only_Expanded.json` | Athena-only IPD and OPD rates and synthetic allocation estimates |
+| Consultation workspace | `clinical_records.json` in this project directory | Locally persisted Streamlit consultation records and status |
+| Knowledge source | `knowledge_base/knowledge_base_harrison.docx` | Source document indexed for CDS retrieval |
+| Retrieval artifacts | `chroma_db/` | Local vector/TF-IDF index and source chunks |
+
+The EHR JSON is the source for patient and coverage data. Generated bills,
+bill lines, claims, and audit events are written to their EHR sheets. File
+writes use a temporary file and atomic replacement to reduce partial-write
+risk. The duplicate-bill check is serialized within one backend process; this
+local JSON demonstration store does not provide cross-process transactions,
+authenticated actors, tamper-proof audit evidence, or database-grade
+backup/restore.
+
+Before manually editing the JSON, stop the backend and keep a backup. Do not
+edit the live file while the application is running.
+
+## Setup
+
+Run the commands from the `Clinical_decision_support` directory.
+
+### 1. Create and activate the project environment
 
 ```powershell
-cd "D:\Agent pod"
-python -m venv venv
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-Activate it:
+If PowerShell blocks activation, use the environment's interpreter directly:
 
 ```powershell
-.\venv\Scripts\Activate.ps1
-```
-
-If PowerShell blocks activation, use the interpreter directly instead of changing execution policy:
-
-```powershell
-& "D:\Agent pod\venv\Scripts\python.exe" --version
+& ".\.venv\Scripts\python.exe" --version
 ```
 
 ### 2. Install dependencies
 
 ```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-Important: use the same `venv\Scripts\python.exe` for installation and for starting FastAPI. The machine may have multiple Windows Store Python launchers. Installing with one interpreter and running with another causes errors such as `No module named 'chromadb'`.
+Use this same virtual environment for starting the backend and Streamlit.
+Installing a package into a different Python environment can cause import
+errors at startup.
 
-### 3. Configure the LLM API
+### 3. Configure the LLM
 
-Create or edit `.env` in this directory:
+Create `Clinical_decision_support/.env` (or configure the parent `.env`) with
+the values required by your Coforge LLM Router account:
 
 ```dotenv
 COFORGE_API_KEY=replace-with-your-key
 COFORGE_API_URL=https://your-llm-router.example/v2/chat/completions
-COFORGE_MODEL=router
+COFORGE_MODEL=your-enabled-model
+
+# Optional: CPT-specific route; falls back to the general settings if omitted.
+COFORGE_CPT_API_KEY=
+COFORGE_CPT_API_URL=
+COFORGE_CPT_MODEL=
 ```
 
-Never commit a real API key. The application loads `.env` through `app/core/config.py`.
+Never commit a real API key. The backend must be restarted after changing
+`.env`. A health response only confirms the API process is responding; it does
+not test the LLM key, knowledge base, or billing workbook.
 
-## Running The Application
+## Run the application
 
-Use two terminals. Start both from `D:\Agent pod\Clinical_decision_support`.
+Open two terminals in `Clinical_decision_support`. In both, activate `.venv`
+or invoke its Python executable directly.
 
-### Terminal 1: FastAPI backend
+### Terminal 1 — backend
 
 ```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m app
+Remove-Item Env:PORT -ErrorAction SilentlyContinue
+Remove-Item Env:HOST -ErrorAction SilentlyContinue
+python -m app
 ```
 
-The API runs at:
+Expected endpoints:
 
-- Root: http://127.0.0.1:8000/
-- Health: http://127.0.0.1:8000/health
-- Swagger UI: http://127.0.0.1:8000/docs
+- API root: `http://127.0.0.1:8001/`
+- Health: `http://127.0.0.1:8001/health`
+- Swagger: `http://127.0.0.1:8001/docs`
 
 Expected health response:
 
@@ -128,87 +332,115 @@ Expected health response:
 {"status":"ok"}
 ```
 
-`app/__main__.py` intentionally starts Uvicorn without reload. This keeps child processes from switching to a different Python interpreter on Windows.
-
-### Terminal 2: Streamlit frontend
+### Terminal 2 — payer-aware frontend (recommended for current billing flow)
 
 ```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m streamlit run frontend/streamlit_app.py
+Remove-Item Env:CLINICAL_API_URL -ErrorAction SilentlyContinue
+python -m streamlit run frontend/streamlit1_app.py --server.port 8503
 ```
 
-Open the URL printed by Streamlit, normally http://localhost:8501.
+Open `http://127.0.0.1:8503/`.
 
-### Quick backend check
+### Optional — original frontend
+
+To run the original UI instead, use:
 
 ```powershell
-Invoke-WebRequest `
-  -Uri http://127.0.0.1:8000/health `
-  -UseBasicParsing
+Remove-Item Env:CLINICAL_API_URL -ErrorAction SilentlyContinue
+python -m streamlit run frontend/streamlit_app.py --server.port 8502
 ```
 
-If the UI says it cannot connect, check that port 8000 is listening and that the API terminal is running from the project directory with the venv interpreter.
+Open `http://127.0.0.1:8502/`. Both frontends use the shared API unless
+`CLINICAL_API_URL` is set to another backend.
 
-## API Endpoints
+### Use a different backend port
 
-All endpoints are defined in `app/api/routes.py`.
-
-| Method | Path | Purpose | Request body |
-| --- | --- | --- | --- |
-| GET | `/` | API metadata and links | None |
-| GET | `/health` | Health check | None |
-| POST | `/analyze` | Legacy patient-summary analysis returning parsed JSON CDS fields | `{"patient_summary":"..."}` |
-| POST | `/encounters/scribe` | Generate a structured encounter note without CDS | `{"transcript":"...", "include_cds":false}` |
-| POST | `/encounters/analyze` | Run scribe and CDS in one backend operation | `{"transcript":"...", "include_cds":true}` |
-| POST | `/encounters/cds` | Add CDS to an existing encounter context | Encounter context JSON |
-| POST | `/encounters/analyze-audio` | Backend-side audio transcription and analysis | Multipart form field `file` |
-| POST | `/retrieve` | Retrieve local knowledge-base context | `{"query":"...", "top_k":5}` |
-
-Example scribe request:
+If port 8001 is already occupied, choose a free port and set it in both
+processes:
 
 ```powershell
-$body = @{ transcript = "Patient reports a cough for two days."; include_cds = $false } | ConvertTo-Json
+# Backend terminal
+$env:PORT = "8003"
+python -m app
+```
+
+```powershell
+# Frontend terminal
+$env:CLINICAL_API_URL = "http://127.0.0.1:8003"
+python -m streamlit run frontend/streamlit1_app.py --server.port 8503
+```
+
+Do not point a frontend at an unrelated API that happens to respond on the
+selected port. Verify `/openapi.json` identifies this project as
+`Clinical Decision Support API` and `/health` returns `{"status":"ok"}`.
+
+## API reference
+
+Routes are implemented in `app/api/routes.py`; request models are in
+`app/api/schemas.py`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | API name and links |
+| `GET` | `/health` | Liveness response |
+| `GET` | `/patients` | Patient list with active payer and plan joined from Insurance |
+| `GET` | `/patients/export` | Export the EHR JSON payload |
+| `GET` | `/patients/{patient_id}` | Patient chart, patient details, active payer, and patient-linked sheets |
+| `POST` | `/patients` | Create a patient and optional initial payer coverage |
+| `PUT` | `/patients/{patient_id}` | Update patient demographics |
+| `PUT` | `/patients/{patient_id}/records/{sheet_name}` | Replace editable records in a patient sheet |
+| `POST` | `/patients/{patient_id}/records/{sheet_name}` | Add a patient-linked record |
+| `DELETE` | `/patients/{patient_id}` | Delete patient and linked records (API only; not exposed in the UIs) |
+| `POST` | `/patients/{patient_id}/bills/ipd` | Generate and save a bill using the selected payer and encounter |
+| `POST` | `/codes` | Return ICD-10-CM and CPT/HCPCS code suggestions |
+| `POST` | `/encounters/scribe` | Generate SOAP/context without running CDS |
+| `POST` | `/encounters/cds` | Add CDS to a submitted encounter context |
+| `POST` | `/encounters/analyze` | Run the scribe and CDS combined flow |
+| `POST` | `/encounters/analyze-audio` | Backend-side audio transcription and encounter analysis |
+| `POST` | `/analyze` | Legacy patient-summary analysis |
+| `POST` | `/retrieve` | Retrieve local knowledge-base context |
+
+Example bill request (the patient and encounter must exist):
+
+```powershell
+$body = @{
+    cpt_hcpcs_codes = @("99213")
+    icd10_codes = @()
+    encounter_id = "ENC00504"
+    encounter_type = "Outpatient"
+    payer_name = "Athena Health Insurance"
+} | ConvertTo-Json
+
 Invoke-RestMethod `
-  -Uri http://127.0.0.1:8000/encounters/scribe `
+  -Uri http://127.0.0.1:8001/patients/P100052/bills/ipd `
   -Method Post `
   -ContentType "application/json" `
   -Body $body
 ```
 
-Example combined encounter request:
+The only supported `payer_name` is `Athena Health Insurance`. If
+`encounter_id` is provided, it must belong to the URL's patient. The API
+returns useful HTTP errors for missing patients/encounters, invalid input, and
+unavailable source files.
+
+## Knowledge base and CDS evidence
+
+The source document is
+`knowledge_base/knowledge_base_harrison.docx`. Build or rebuild the local
+retrieval artifacts after changing the source document or when the index is
+missing:
 
 ```powershell
-$body = @{ transcript = "Patient reports a cough for two days."; include_cds = $true } | ConvertTo-Json
-Invoke-RestMethod `
-  -Uri http://127.0.0.1:8000/encounters/analyze `
-  -Method Post `
-  -ContentType "application/json" `
-  -Body $body
+python -m app.scripts.build_kb
 ```
 
-## Knowledge Base
+The retriever uses the configured local index, removes highly overlapping
+chunks, and includes source/section labels in retrieved context. The CDS agent
+requires the model to cite at least one retrieved source when source labels are
+available. If no relevant passage is returned, the prompt must say so instead
+of implying the source supports a recommendation.
 
-The source knowledge base is `knowledge_base/knowledge_base_harrison.docx`.
-
-`app/scripts/build_kb.py` performs these steps:
-
-1. Extract Word paragraphs and tables while preserving heading context.
-2. Split each document block into overlapping clinical text chunks with source metadata.
-3. Generate normalized Sentence Transformer embeddings in batches.
-4. Replace the current Chroma collection using batched upserts.
-5. Retrieve the nearest candidate chunks directly from Chroma.
-6. Deduplicate candidates and bound the cited context sent to the LLM.
-
-Run it after changing the PDF or when generated artifacts are missing:
-
-```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m app.scripts.build_kb
-```
-
-The retriever uses Chroma's cosine vector search and adds source filename, document block, and heading citations to the CDS context. Word documents do not reliably expose printed page numbers through `python-docx`, so citations use block and heading metadata. `chroma_db` is generated runtime data and should be treated as an application artifact. The first build downloads the configured Sentence Transformer model.
-
-For a large PDF, these optional `.env` settings control resource usage:
+Optional retrieval configuration in `.env`:
 
 ```dotenv
 EMBEDDING_BACKEND=auto
@@ -219,204 +451,163 @@ RETRIEVAL_RESULTS=5
 MAX_CONTEXT_CHARS=12000
 ```
 
-`EMBEDDING_BACKEND=auto` uses Sentence Transformers when the model is available locally or can be downloaded. If model download fails, it automatically builds a sparse TF-IDF index instead. Set `EMBEDDING_BACKEND=tfidf` to force fully offline indexing, or `EMBEDDING_BACKEND=sentence_transformer` to fail instead of falling back.
+`EMBEDDING_BACKEND=auto` uses Sentence Transformers when available and the
+project's TF-IDF artifacts as a fallback during index construction. Use
+`EMBEDDING_BACKEND=tfidf` to request TF-IDF explicitly. Scanned images embedded
+in Word documents are not OCR'd by `python-docx`; scanned source text must be
+made extractable before indexing.
 
-If the Word file contains images of scanned pages, OCR them before indexing; `python-docx` extracts document text but does not OCR embedded images.
+## Tests
 
-## File Guide
-
-### Application entry points
-
-- `app/__main__.py`: command-line entry point for `python -m app`; starts Uvicorn on port 8000.
-- `app/main.py`: creates the FastAPI application and registers the API router.
-- `frontend/streamlit_app.py`: main Streamlit UI, page navigation, recording workflow, API calls, dashboard, review screen, and local record persistence.
-- `frontend/api_client.py`: small HTTP client used by Streamlit to call the FastAPI backend.
-
-### API layer
-
-- `app/api/routes.py`: HTTP route handlers, error translation, lazy loading of optional RAG and audio dependencies.
-- `app/api/schemas.py`: Pydantic request and response models for patient analysis, encounters, and retrieval.
-- `app/api/__init__.py`: API package marker.
-
-### Agents and encounter context
-
-- `app/agent/context.py`: shared `EncounterContext` Pydantic model containing transcript, SOAP note, patient summary, highlights, recommendations, and clinical fields.
-- `app/agent/ambient_scribe_agent.py`: ambient scribe agent that turns transcript text into structured encounter context.
-- `app/agent/cds_agent.py`: retrieves guidance and asks the LLM for CDS recommendations.
-- `app/agent/encounter_agent.py`: orchestrates scribe-only, CDS-only, and combined encounter processing.
-- `app/agent/__init__.py`: agent package marker.
-- `app/agents/base_agent.py`: base-agent package implementation retained for the broader agent structure.
-- `app/agents/__init__.py`: agents package marker.
-
-### Services and external integrations
-
-- `app/llm_client.py`: sends prompts to the Coforge LLM Router API, validates configuration, retries transient HTTP failures, and returns the model message.
-- `app/services/soap_service.py`: prompts the LLM for a JSON SOAP note and parses the response.
-- `app/services/clinical_service.py`: legacy clinical-analysis service that parses an LLM JSON response.
-- `app/services/transcription_service.py`: backend-side audio transcription using SpeechRecognition.
-- `app/services/__init__.py`: services package marker.
-- `app/core/config.py`: loads `.env`, defines project paths, and exposes LLM configuration values.
-- `app/core/__init__.py`: core package marker.
-
-### Retrieval-augmented generation
-
-- `app/rag/pdf_loader.py`: extracts text from one PDF or all PDFs in a folder.
-- `app/rag/chunker.py`: splits source text into overlapping chunks with LangChain text splitters.
-- `app/rag/embeddings.py`: creates the TF-IDF vectorizer and matrix.
-- `app/rag/vector_store.py`: initializes the persistent ChromaDB collection and stores chunks with embeddings.
-- `app/rag/retriever.py`: loads persisted TF-IDF artifacts, scores chunks, and returns relevant guideline text.
-- `app/rag/__init__.py`: RAG package marker.
-- `app/scripts/build_kb.py`: command-line knowledge-base builder.
-- `app/scripts/__init__.py`: scripts package marker.
-
-### Rules and domain models
-
-- `app/rules/rule_engine.py`: deterministic checks for HbA1c, blood pressure, chest pain, retinal screening gaps, and medication allergies.
-- `app/rules/__init__.py`: rules package marker.
-- `app/models/encounter.py`: encounter model definitions used by the application structure.
-- `app/models/__init__.py`: models package marker.
-
-### Tests
-
-- `app/tests/test_api.py`: health, retrieval, legacy analysis, validation, and encounter API tests.
-- `app/tests/test_agents.py`: ambient scribe response parsing test.
-- `app/tests/test_clinical_service.py`: clinical-service parsing and behavior tests.
-- `app/tests/__init__.py`: test package marker.
-
-### Data and runtime artifacts
-
-- `clinical_records.json`: Streamlit's local record database for this application.
-- `knowledge_base/diseases.pdf`: source clinical guidance document.
-- `chroma_db/chroma.sqlite3`: persistent ChromaDB database.
-- `chroma_db/tfidf_vectorizer.pkl`: serialized TF-IDF vectorizer.
-- `chroma_db/tfidf_matrix.npz`: serialized sparse TF-IDF matrix.
-- `.env`: local secrets and LLM configuration; do not commit real credentials.
-- `requirements.txt`: Python dependencies.
-
-## Important Code Flows
-
-### Recording to note
-
-`frontend/streamlit_app.py` receives `st.audio_input`, reads the audio bytes, and transcribes them locally. The resulting text is passed to `HealthcareApiClient.scribe_encounter`. The client calls `/encounters/scribe`, which creates an `EncounterAgent` and calls `prepare`. The ambient scribe agent produces an `EncounterContext`, which is returned to Streamlit and displayed.
-
-### Note to CDS recommendation
-
-When the user selects CDS and presses **Generate Note**, Streamlit passes the existing encounter context to `HealthcareApiClient.add_cds`. The client calls `/encounters/cds`. The backend invokes `EncounterAgent.add_clinical_decision_support`, which calls `ClinicalDecisionSupportAgent.analyze_context`. That method retrieves guidance, builds a prompt containing the patient summary and retrieved context, calls the Coforge LLM, and writes the recommendation into the encounter context.
-
-### Saving a record
-
-After the optional CDS request succeeds, Streamlit builds a record dictionary containing patient metadata, transcript, summary, retrieved guidelines, recommendations, and analysis version. It inserts the record at the beginning of `st.session_state.records`, writes `clinical_records.json`, and opens the review page.
-
-### HCC / medical coding workflow
-
-The coding workspace creates machine-suggested diagnosis and procedure codes from the clinical insights detected in an encounter transcript. In this repository, “HCC coding” currently means ICD-10 diagnosis matching and CPT/HCPCS procedure matching. It does not calculate CMS-HCC categories, RAF scores, payment models, or final billable coding decisions.
-
-The flow is:
-
-1. `get_detected_insights()` in `frontend/streamlit_app.py` scans the transcript for supported diagnoses, symptoms, risk factors, tests, and procedures. Examples include hypertension, diabetes, fever, CBC, A1C, chest X-ray, CT scan, MRI, and ultrasound.
-2. On the **Codes** page, the clinician selects an encounter and chooses **Generate Code Suggestions**.
-3. `get_code_suggestions()` removes duplicates and sends each insight to `classify_medical_item()` in `code_matcher.py`.
-4. Diagnosis, symptom, disease, and injury terms are routed to ICD-10. Test, imaging, therapy, and other procedure/service terms are routed to CPT/HCPCS. The UI also has a procedure-term fallback for items that the classifier cannot categorize.
-5. `get_medical_codes()` loads the local ICD-10 and CPT/HCPCS datasets, checks exact and phrase matches first, and then uses RapidFuzz `WRatio` fuzzy matching. The Streamlit workflow uses an 80% similarity threshold and returns one strongest match per item by default.
-6. Common procedures and diagnoses have deterministic fallback mappings when a suitable dataset entry is unavailable, such as CBC (`85025`), A1C (`83036`), chest X-ray (`71045`/`71046`), hypertension (`I10`), and diabetes (`E11.9`).
-7. Results are displayed separately in the **ICD-10 Diagnosis Codes** and **CPT/HCPCS Procedure Codes** tabs. Each result includes the extracted term, matched description, and code.
-
-The matcher looks for these dataset files relative to `code_matcher.py`:
-
-- `ICD10CM_2022_Codes.json` or another supported ICD-10 JSON filename
-- `CPT_CODES.json`, `structured_cpt_hcpcs_2026.json`, or another supported CPT/HCPCS JSON filename
-
-The coding feature is intentionally conservative: unsupported or ambiguous terms are not forced into a code family, and a fuzzy match is only returned when it meets the threshold. Code suggestions must be reviewed by a qualified coder or clinician before billing, claim submission, or adding them to the legal health record. The current prototype does not persist approved codes back into `clinical_records.json`.
-
-## Testing
-
-Run the test suite with the project interpreter:
+From `Clinical_decision_support`, run:
 
 ```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m pytest -q
+python -m pytest app/tests -q
 ```
 
-Run only API tests:
+Focused tests:
 
 ```powershell
-& "D:\Agent pod\venv\Scripts\python.exe" -m pytest app/tests/test_api.py -q
+python -m pytest app/tests/test_agents.py app/tests/test_api.py -q
+python -m pytest app/tests/test_streamlit1_app.py app/tests/test_api_client.py -q
+python -m pytest app/tests/test_record_store.py app/tests/test_rag.py -q
 ```
 
-Tests should not require a real LLM call when mocks are used. End-to-end manual testing does require valid `.env` configuration and network access to the Coforge service.
+Tests mock external services where appropriate; a passing test suite does not
+prove that an actual API key, external LLM endpoint, Google transcription, or
+production clinical evidence source is available.
 
 ## Troubleshooting
 
-### `No module named 'chromadb'`
+### Frontend says it cannot connect to FastAPI
 
-The backend is probably using global Python instead of the repository virtual environment. Stop old Uvicorn processes and run:
+1. Start the backend with `python -m app` from this project directory.
+2. Check `http://127.0.0.1:8001/health`.
+3. Confirm that the frontend's `CLINICAL_API_URL` is unset or points to the
+   backend actually running this project.
+4. If the backend uses another port, set the same URL in the frontend terminal.
+
+### Port is already in use
+
+Choose a free backend port using `PORT` and set `CLINICAL_API_URL` accordingly.
+For Streamlit, pass a free port with `--server.port`. Avoid changing ports in
+only one terminal.
+
+### `No module named ...` at startup
+
+The process is likely using a different Python environment from the one where
+dependencies were installed. Activate this project's `.venv` in each terminal
+or invoke `.venv\Scripts\python.exe` directly.
+
+### SOAP or CDS is unavailable
+
+Check `.env`, restart the backend after changing it, verify network access to
+the configured LLM endpoint, and review the displayed error/status metadata.
+CDS also requires built retrieval artifacts and a non-empty knowledge base.
+The system preserves the transcript when the scribe cannot structure it and
+does not replace a failed evidence-grounded CDS request with generic advice.
+Re-running a request is not a guarantee of provider availability.
+
+### A patient still shows “Payer not assigned”
+
+The payer displayed on a patient comes from the active `Insurance` record. In
+the alternate billing flow, payer assignment is persisted only when a bill is
+generated and saved with a payer. **Validate Bill** checks the saved bill; it
+does not assign coverage. Refresh/reload EHR data after generating the bill.
+
+### Patient selector does not show the expected payer-aware workflow
+
+Use the alternate frontend at `http://127.0.0.1:8503/` and confirm it was
+started with:
 
 ```powershell
-cd "D:\Agent pod\Clinical_decision_support"
-& "D:\Agent pod\venv\Scripts\python.exe" -m app
+python -m streamlit run frontend/streamlit1_app.py --server.port 8503
 ```
 
-Confirm the dependency:
+The 8502 UI is the original frontend and does not have the same payer-aware
+bill flow.
 
-```powershell
-& "D:\Agent pod\venv\Scripts\python.exe" -c "import chromadb; print(chromadb.__version__)"
+## Project map
+
+```text
+Clinical_decision_support/
+  app/
+    agent/                 Encounter, scribe, and CDS orchestration
+    api/                   FastAPI routes and Pydantic request/response models
+    core/                  Environment and runtime configuration
+    rag/                   Knowledge ingestion, embeddings, and retrieval
+    scripts/build_kb.py    Build local CDS retrieval artifacts
+    services/              EHR, billing, transcription, and legacy analysis
+    tests/                 API, agent, billing, frontend-helper, and RAG tests
+  frontend/
+    streamlit_app.py       Original Streamlit UI (default port 8502)
+    streamlit1_app.py      Athena billing UI (port 8503)
+    api_client.py          Shared HTTP client for FastAPI
+    clinical_workflow.py   Patient linking, coding, bill eligibility/validation
+    record_store.py        Local consultation JSON validation and persistence
+    theme.css              Alternate frontend presentation
+    ui_theme.py            Theme selection and application
+  knowledge_base/          Source documents for CDS evidence
+  chroma_db/               Generated local retrieval/index artifacts
+  clinical_records.json    Local consultation workspace store
 ```
 
-### Cannot connect to port 8000
+Related files in the parent repository directory:
 
-Check the health endpoint:
+- `Epic_Inspired_USA_50_Patient_Demo_25_Athena_25_Care_Gap.json`: active EHR
+  demo dataset; all current coverage is Athena.
+- `Hospital_IPD_OPD_Charges_Athena_Only_Expanded.json`: authoritative
+  Athena-only billing and charge-preview source. There is no combined-payer
+  fallback. Its synthetic 71045 and 82947 OPD demo estimates are explicitly
+  labeled and are not verified contract rates.
+- `Epic_Inspired_USA_50_Patient_Demo.json`: original/legacy EHR demo data.
 
-```powershell
-Invoke-WebRequest -Uri http://127.0.0.1:8000/health -UseBasicParsing
-```
+## Changes represented in the current implementation
 
-If it fails, start the backend from the `Clinical_decision_support` directory. Running `python -m app` from `D:\Agent pod` cannot find this project's `app` package.
+The current implementation includes the following user-facing and technical
+changes:
 
-### Missing LLM configuration
+- Added an alternate Athena billing workflow without replacing the original
+  Streamlit entry point.
+- Added the 50-patient EHR demo dataset and IPD/OPD charge sheets; John F.
+  Kennedy and Donald Trump are separately addressable
+  patients after the original 50.
+- Consolidated current active coverage and new billing to Athena; older
+  historical bills retain their original payer for audit.
+- Saved a generated bill, its lines, and draft claim rows to the EHR data, and
+  kept the hospital account stable for repeat bills on the same encounter.
+- Saved the selected bill payer as active synthetic primary coverage so the
+  EHR patient selector and Patient Master view show the payer after bill
+  generation.
+- Added explicit validation of bill patient, encounter, payer, priced lines,
+  and gross-total arithmetic. Validation is not claim submission.
+- Added an explicit performed-and-documented service confirmation before
+  generating a bill.
+- Added evidence citation requirements, bounded retries, and clear failure
+  behavior for SOAP/CDS generation rather than success-shaped clinical
+  fallbacks.
+- Added patient-link checks, atomic local consultation persistence, improved
+  theme styling, and a visible green sidebar control in the alternate UI.
+- Documented synthetic-data, privacy, and clinical/billing limitations.
 
-Check that `.env` exists in `Clinical_decision_support` and contains non-empty `COFORGE_API_KEY` and `COFORGE_API_URL` values. Restart the backend after changing `.env`.
+## Limitations and safety
 
-### Knowledge-base artifacts are missing or empty
-
-Run:
-
-```powershell
-& "D:\Agent pod\venv\Scripts\python.exe" -m app.scripts.build_kb
-```
-
-Then restart the backend and retry CDS.
-
-### CDS returns a model or network error
-
-The backend and retrieval layer may be healthy while the external LLM is unavailable. Inspect the FastAPI terminal for the upstream status code, verify the API URL and key, and confirm the model name accepted by the configured router.
-
-### Audio recording or transcription fails
-
-Check browser microphone permissions, confirm the recording has a supported audio format, and verify that SpeechRecognition can reach its speech-recognition provider. The current Streamlit flow transcribes locally; the backend audio endpoint is a separate optional path.
-
-## Notes For Future LLM-Assisted Development
-
-When analyzing this repository, start with these files in order:
-
-1. `README.md` for architecture and commands.
-2. `frontend/streamlit_app.py` for the user workflow.
-3. `frontend/api_client.py` for the HTTP contract used by the UI.
-4. `app/api/routes.py` and `app/api/schemas.py` for backend boundaries.
-5. `app/agent/encounter_agent.py` and `app/agent/context.py` for orchestration and data shape.
-6. `app/agent/ambient_scribe_agent.py` and `app/agent/cds_agent.py` for model behavior.
-7. `app/llm_client.py` and `app/core/config.py` for external configuration.
-8. `app/rag/retriever.py`, `app/rag/vector_store.py`, and `app/scripts/build_kb.py` for knowledge retrieval.
-9. `app/tests/` before changing behavior.
-
-Preserve the distinction between:
-
-- UI-local audio transcription and the backend audio endpoint.
-- Scribe-only processing and CDS processing.
-- Persisted TF-IDF artifacts and the ChromaDB document collection.
-- Local JSON record storage and the external LLM service.
-
-Avoid logging or exposing `COFORGE_API_KEY`, patient identifiers, raw recordings, or full clinical records in diagnostics.
-
-## Project Status
-
-The application is a local prototype with a Streamlit frontend, FastAPI backend, local RAG artifacts, deterministic clinical rules, and an external LLM integration. It does not currently provide authentication, multi-user storage, production audit controls, encryption, clinical validation, or deployment configuration.
+- **No real PHI:** frontend recording uses an external transcription service and
+  the backend sends encounter text to the configured LLM provider. This demo
+  has no authentication, authorization, role controls, encryption-at-rest
+  design, or production privacy controls.
+- **No production EHR:** JSON files are not a transactional multi-user database.
+  Concurrent writers, tamper-evident audit, disaster recovery, and a
+  production-grade backup policy are not implemented.
+- **No clinical guarantee:** SOAP is model-assisted or transcript-only
+  fallback; CDS depends on source quality, retrieval quality, and model
+  availability. A clinician must review all content and supporting evidence.
+- **No final coding determination:** ICD-10-CM and CPT/HCPCS suggestions can be
+  incomplete or wrong. A qualified coder/clinician must confirm diagnosis,
+  code, units, documentation, and service performance.
+- **No insurance processing:** payer assignments and cost shares are synthetic
+  demo values. There is no eligibility, benefits, authorization, claim
+  adjudication, claim submission, or payment processing.
+- **Health endpoint scope:** `/health` is a liveness check only; it does not
+  validate LLM configuration, knowledge-base availability, EHR contents, or
+  charge sheet readability.

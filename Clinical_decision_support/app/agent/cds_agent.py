@@ -5,18 +5,6 @@ from app.agent.context import EncounterContext
 class ClinicalDecisionSupportAgent:
     name = "clinical_decision_support"
 
-    @staticmethod
-    def _fallback_recommendation(patient_summary: str) -> str:
-        return (
-            "Recommendation\n"
-            "Review the documented symptoms, relevant history, medications, and vital signs; "
-            "confirm the assessment and arrange appropriate follow-up based on clinical judgment.\n\n"
-            "Reasoning\n"
-            f"The available encounter information was: {patient_summary.strip() or 'limited'}.\n\n"
-            "Safety Note\n"
-            "This is educational decision support and does not replace evaluation by a qualified clinician."
-        )
-
     def analyze(self, patient_summary):
         encounter = EncounterContext(patient_summary=patient_summary)
         self.analyze_context(encounter)
@@ -25,28 +13,75 @@ class ClinicalDecisionSupportAgent:
     def analyze_context(self, encounter: EncounterContext) -> EncounterContext:
         from app.rag.retriever import retrieve_documents
 
-        try:
-            guideline_context = retrieve_documents(encounter.patient_summary, top_k=5)
-        except FileNotFoundError:
-            guideline_context = "No local clinical guideline context is available."
+        structured_context = (
+            encounter.as_patient_summary().strip()
+            or encounter.patient_summary.strip()
+        )
+        transcript = encounter.transcript.strip()
+        if structured_context and transcript:
+            clinical_context = (
+                f"Structured clinical documentation:\n{structured_context}\n\n"
+                f"Original consultation transcript:\n{transcript}"
+            )
+        else:
+            clinical_context = structured_context or transcript
+        if not clinical_context:
+            raise ValueError(
+                "CDS requires a patient summary, structured encounter details, or transcript."
+            )
+
+        guideline_context = retrieve_documents(clinical_context, top_k=5)
         encounter.retrieved_guidelines = guideline_context
         prompt = (
-            "You are a Clinical Decision Support Assistant.\n"
-            "Use the patient summary and retrieved medical guideline context only.\n"
-            "Provide a clinically useful recommendation, explain the reasoning, and include a brief safety note that this is educational and decision-support only.\n\n"
-            f"Patient Summary:\n{encounter.patient_summary}\n\n"
+            "Prepare cautious, clinician-facing educational decision support. Use only facts "
+            "documented in the encounter and the supplied guideline passages. Do not invent "
+            "symptoms, examination findings, diagnoses, medication details, or test results. "
+            "Separate documented facts from interpretation, explain the reasoning, identify "
+            "important missing information, and state uncertainty. Do not present a treatment "
+            "or test as a guideline recommendation unless a supplied passage supports it. "
+            "If no relevant passage is supplied, say so explicitly and do not imply that "
+            "Harrison's supports a recommendation. Return these sections: Clinical context, "
+            "Reasoning, Evidence and citations, Considerations for clinician review, Missing "
+            "information, and Safety note. Cite supporting passages using their exact "
+            "'Source:' citation labels. State that this is educational decision support, "
+            "not a diagnosis or a substitute for clinician judgment.\n\n"
+            f"Encounter information:\n{clinical_context}\n\n"
             f"Retrieved guideline context:\n{guideline_context}\n"
         )
-        try:
-            recommendation = call_llm(
-                prompt=prompt,
-                system_prompt="You are a Clinical Decision Support Assistant.",
-            )
-        except Exception:
-            recommendation = ""
-        encounter.recommendations = str(recommendation).strip() or self._fallback_recommendation(
-            encounter.patient_summary
-        )
+        citation_labels = [
+            line.strip()
+            for line in guideline_context.splitlines()
+            if line.strip().startswith("Source:")
+        ]
+        recommendation = ""
+        failure_reason = "The CDS model returned an empty response."
+        for _ in range(2):
+            recommendation = str(
+                call_llm(
+                    prompt=prompt,
+                    system_prompt=(
+                        "You provide careful, evidence-grounded clinical decision support. "
+                        "Do not guess, overstate certainty, or claim that a source says more "
+                        "than the supplied text supports."
+                    ),
+                )
+                or ""
+            ).strip()
+            if not recommendation:
+                failure_reason = "The CDS model returned an empty response."
+                continue
+            if citation_labels and not any(
+                citation in recommendation for citation in citation_labels
+            ):
+                failure_reason = (
+                    "The CDS model did not cite any of the retrieved guideline passages."
+                )
+                continue
+            break
+        else:
+            raise RuntimeError(f"{failure_reason} No recommendation was generated after retrying.")
+
+        encounter.recommendations = recommendation
         return encounter
 
     def generate(self, patient_summary):

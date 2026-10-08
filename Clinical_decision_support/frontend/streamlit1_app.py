@@ -19,71 +19,44 @@ import requests
 import speech_recognition as sr
 import streamlit as st
 
-from frontend.chargemaster import load_chargemaster
-from frontend.clinical_workflow import consultation_assessment
+from frontend.ui_theme import apply_theme
+from frontend.record_store import load_records, save_records
+from frontend.clinical_workflow import (
+    CODE_MATCHER_VERSION,
+    MASTER_INSIGHTS,
+    append_audit_event,
+    billing_eligible_patients,
+    can_generate_bill,
+    code_results_signature,
+    create_physician_query,
+    consultation_assessment,
+    encounter_diagnosis_label,
+    find_matching_bill,
+    get_backend_code_suggestions,
+    get_code_suggestions,
+    get_detected_insights,
+    get_record_insights,
+    is_bill_history_visible,
+    is_seed_demo_patient,
+    linked_patient_id_for_record,
+    matching_patient_ids_for_record,
+    patient_name_matches_record,
+    record_physician_query_response,
+    revenue_leakage_warning,
+    soap_sections,
+    update_recommendation_review,
+    validate_generated_bill,
+)
 
 if st.session_state.get("theme_defaults_version") != "light-default-v3":
     st.session_state.theme = "Light"
     st.session_state.theme_defaults_version = "light-default-v3"
 theme_name = st.session_state.get("theme", "Light")
-if theme_name == "Dark":
-    theme_vars = """
-    --bg: #1e1e1e; --surface: #292929; --surface-soft: #242424;
-    --border: #3a3a3a; --border-strong: #4a4a4a; --text: #f5f5f5;
-    --muted: #b8b8b8; --primary: #f59e0b; --primary-hover: #d97706;
-    --success: #86efac; --success-soft: #164e2b; --warning: #fbbf24;
-    --warning-soft: #5b4108; --danger: #fca5a5; --danger-soft: #5c2020;
-    --info: #93c5fd; --info-soft: #1e3a5f; --purple: #d8b4fe;
-    --sidebar-bg: #181818; --sidebar-border: #343434; --sidebar-text: #f5f5f5;
-    --sidebar-muted: #b8b8b8; --sidebar-hover: #3a2a12;
-    """
-    header_background = "rgba(30, 30, 30, .98)"
-else:
-    theme_vars = """
-    --bg: #f4f7f9; --surface: #ffffff; --surface-soft: #f8fafc;
-    --border: #e2e8f0; --border-strong: #cbd5e1; --text: #17212b;
-    --muted: #64748b; --primary: #148277; --primary-hover: #0f6f66;
-    --success: #15803d; --success-soft: #dcfce7; --warning: #b45309;
-    --warning-soft: #fef3c7; --danger: #b91c1c; --danger-soft: #fee2e2;
-    --info: #2563eb; --info-soft: #dbeafe; --purple: #7c3aed;
-    --sidebar-bg: #fcfcfc; --sidebar-border: #e5e7eb; --sidebar-text: #333333;
-    --sidebar-muted: #6b7280; --sidebar-hover: #fff1ef;
-    """
-    header_background = "rgba(244, 247, 249, .96)"
 
 try:
     from frontend.api_client import HealthcareApiClient
 except ModuleNotFoundError:
     from api_client import HealthcareApiClient
-
-try:
-    from cpt_coder import (
-        classify_medical_item,
-        extract_performed_procedures,
-        get_cpt_codes,
-        get_cpt_candidate_sets,
-        is_explicitly_performed,
-    )
-    from icd10_coder import get_icd10_candidate_sets, get_icd10_codes
-except ModuleNotFoundError:
-    try:
-        from cpt_coder import (
-            classify_medical_item,
-            extract_performed_procedures,
-            get_cpt_codes,
-            get_cpt_candidate_sets,
-            is_explicitly_performed,
-        )
-        from icd10_coder import get_icd10_candidate_sets, get_icd10_codes
-    except ModuleNotFoundError:
-        classify_medical_item = None
-        extract_performed_procedures = None
-        get_cpt_candidate_sets = None
-        get_cpt_codes = None
-        get_icd10_candidate_sets = None
-        get_icd10_codes = None
-        is_explicitly_performed = None
-
 
 # ============================================================
 # 1. CONFIGURATION
@@ -98,475 +71,29 @@ st.set_page_config(
 
 DB_FILE = PROJECT_ROOT / "clinical_records.json"
 ANALYSIS_VERSION = "2"
-CODE_MATCHER_VERSION = "4"
+SUPPORTED_PAYER_OPTIONS = ["Athena Health Insurance"]
 
 
 # ============================================================
 # 2. THEME AND LAYOUT
 # ============================================================
-st.markdown(
-    """
-<style>
-:root {
-    {theme_vars}
-}
-#MainMenu, footer { visibility: hidden; }
-html { font-size: 15px; }
-.stApp {
-    background: var(--bg);
-    color: var(--text);
-    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    transition: none !important;
-}
-header[data-testid="stHeader"] {
-    height: 3.25rem;
-    background: {header_background};
-    border-bottom: 1px solid var(--border);
-    z-index: 1000;
-}
-button[data-testid="stSidebarCollapsedControl"],
-[data-testid="stSidebarCollapseButton"] button,
-[data-testid="collapsedControl"] button { z-index: 1100; }
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="collapsedControl"] {
-    color: var(--primary) !important;
-    background: var(--surface) !important;
-    border: 1px solid var(--primary) !important;
-    border-radius: .45rem !important;
-    opacity: 1 !important;
-}
-[data-testid="collapsedControl"] button,
-[data-testid="stSidebarCollapsedControl"] button,
-[data-testid="stSidebarCollapseButton"] button {
-    color: #4a4a4a !important;
-    background: #f1f3f5 !important;
-    border: 1px solid #d1d5db !important;
-    border-radius: .45rem !important;
-    opacity: 1 !important;
-}
-[data-testid="collapsedControl"] button:hover,
-[data-testid="stSidebarCollapsedControl"] button:hover,
-[data-testid="stSidebarCollapseButton"] button:hover {
-    color: #333333 !important;
-    background: #e5e7eb !important;
-}
-[data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="collapsedControl"] svg,
-[data-testid="stSidebarCollapseButton"] svg {
-    fill: #4a4a4a !important;
-    color: #4a4a4a !important;
-    stroke: #4a4a4a !important;
-}
-[data-testid="stAppViewContainer"] > .main { padding-top: 0; }
-.block-container { max-width: 1440px; padding: 4.5rem 2rem 1.5rem !important; }
-[data-testid="stVerticalBlock"] { gap: .7rem; }
-[data-testid="stHorizontalBlock"] { gap: .75rem; }
-[data-testid="stElementContainer"] { margin-bottom: 0; }
-hr { margin: .25rem 0 .65rem !important; border-color: var(--border) !important; }
-
-/* Sidebar */
-[data-testid="stSidebar"] { background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); }
-[data-testid="stSidebar"] > div:first-child { padding: 1rem .85rem 1.25rem; }
-[data-testid="stSidebar"] * { color: var(--sidebar-text) !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: .3rem; }
-[data-testid="stSidebar"] .stButton > button {
-    min-height: 2.45rem; justify-content: flex-start; background: transparent !important;
-    border: 1px solid transparent !important; box-shadow: none !important; pointer-events: auto !important; position: relative; z-index: 10;
-}
-[data-testid="stSidebar"] .stSelectbox,
-[data-testid="stSidebar"] .stButton { pointer-events: auto !important; position: relative; z-index: 10; }
-[data-testid="stSidebar"] .stButton > button:hover {
-    background: var(--sidebar-hover) !important; border-color: var(--primary) !important;
-}
-.stSidebar [data-baseweb="select"],
-[data-testid="stSidebar"] [data-baseweb="select"] {
-    background: var(--surface) !important;
-    border: 1px solid var(--sidebar-border) !important;
-    border-radius: .45rem !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] > div,
-[data-testid="stSidebar"] [data-baseweb="select"] [role="combobox"] {
-    background: var(--surface) !important;
-    color: var(--sidebar-text) !important;
-    border: 0 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] span,
-[data-testid="stSidebar"] [data-baseweb="select"] input {
-    color: var(--sidebar-text) !important;
-    -webkit-text-fill-color: var(--sidebar-text) !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] svg {
-    fill: var(--sidebar-text) !important;
-    color: var(--sidebar-text) !important;
-    stroke: var(--sidebar-text) !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="radio"] label,
-[data-testid="stSidebar"] [role="radio"] { color: var(--sidebar-text) !important; }
-.shell-logo { margin: .15rem 0 0; font-size: 1.55rem; font-weight: 800; color: var(--sidebar-text) !important; }
-.shell-logo span { color: var(--primary) !important; }
-.shell-subtitle { margin: .1rem 0 1.2rem; color: var(--sidebar-muted) !important; font-size: .75rem; }
-.shell-section-label { margin: .65rem 0 .25rem; color: var(--sidebar-muted) !important; font-size: .64rem; font-weight: 800; letter-spacing: .11rem; }
-.shell-divider { height: 1px; margin: .65rem 0; background: var(--sidebar-border); }
-.shell-user { display: flex; align-items: center; gap: .65rem; margin-top: 1rem; padding: .7rem; border-top: 1px solid var(--sidebar-border); }
-.shell-user b, .shell-user small { display: block; }
-.shell-user small { color: var(--sidebar-muted) !important; font-size: .67rem; }
-.user-avatar { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--primary); color: #fff !important; font-size: .7rem; font-weight: 800; }
-.nav-active-marker { height: 2px; margin: -.36rem .65rem .15rem; border-radius: 2px; background: var(--primary); }
-
-/* Shared */
-.page-heading { margin: 0; font-size: 1.65rem; line-height: 1.18; font-weight: 780; color: var(--text); }
-.page-kicker { margin: .2rem 0 0; font-size: .78rem; color: var(--muted); }
-.section-title { margin: 0; font-size: 1rem; line-height: 1.25; font-weight: 750; color: var(--text); }
-.section-subtitle { margin: .12rem 0 .55rem; font-size: .72rem; color: var(--muted); }
-.toolbar-label, .insight-heading { margin: .55rem 0 .2rem; color: var(--muted); font-size: .65rem; font-weight: 800; letter-spacing: .08rem; text-transform: uppercase; }
-.section-gap { height: .45rem; }
-.stButton > button { min-height: 2.4rem; border-radius: .48rem; font-weight: 650; }
-[data-testid="stMain"] .stButton > button,
-[data-testid="stAppViewContainer"] .main .stButton > button {
-    background: var(--primary) !important; border: 1px solid var(--primary) !important;
-    color: #fff !important; box-shadow: none !important;
-}
-[data-testid="stMain"] .stButton > button:hover,
-[data-testid="stAppViewContainer"] .main .stButton > button:hover {
-    background: var(--primary-hover) !important; border-color: var(--primary-hover) !important;
-}
-[data-testid="stMain"] .stButton > button:disabled { background: #94bdb8 !important; border-color: #94bdb8 !important; opacity: .72 !important; }
-.stTextInput, .stSelectbox, .stDateInput, .stTextArea, .stRadio { margin-bottom: 0 !important; }
-[data-baseweb="input"], [data-baseweb="select"] > div, textarea { border-radius: .45rem !important; }
-[data-testid="stSelectbox"] [data-baseweb="select"] > div,
-[data-testid="stSelectbox"] [data-baseweb="select"] * {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-}
-[data-testid="stSelectbox"] [role="combobox"],
-[data-testid="stSelectbox"] input,
-[data-testid="stTextInput"] input,
-[data-testid="stTextArea"] textarea {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-    -webkit-text-fill-color: var(--text) !important;
-    opacity: 1 !important;
-    caret-color: var(--text) !important;
-}
-[data-testid="stTextArea"] textarea:disabled,
-[data-testid="stTextArea"] textarea[disabled] {
-    background: var(--surface-soft) !important;
-    color: var(--text) !important;
-    -webkit-text-fill-color: var(--text) !important;
-    opacity: 1 !important;
-}
-[data-testid="stSelectbox"] [data-baseweb="popover"] * { color: var(--text) !important; }
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] details,
-[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-    border-color: var(--border) !important;
-}
-[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] > div,
-[data-testid="stSidebar"] [data-baseweb="select"] * {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-}
-[data-testid="stSidebar"] [data-baseweb="popover"] * { color: var(--text) !important; }
-[data-testid="stSidebar"] [data-baseweb="popover"],
-[data-testid="stSidebar"] [role="listbox"] {
-    background: var(--surface) !important;
-    color: var(--sidebar-text) !important;
-    border: 1px solid var(--sidebar-border) !important;
-}
-[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] li { color: var(--text); }
-[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
-    --gdg-bg-cell: var(--surface);
-    --gdg-bg-cell-medium: var(--surface);
-    --gdg-bg-header: var(--surface);
-    --gdg-bg-header-hovered: var(--surface-soft);
-    --gdg-bg-header-hasFocus: var(--surface-soft);
-    --gdg-text-dark: var(--text);
-    --gdg-text-medium: var(--text);
-    --gdg-text-light: var(--muted);
-    --gdg-text-header: var(--text);
-    --gdg-text-header-selected: var(--text);
-    --gdg-border-color: var(--border);
-    --gdg-horizontal-border-color: var(--border);
-    --gdg-link-color: var(--primary);
-    background: var(--surface) !important;
-    border-color: var(--border) !important;
-}
-[data-testid="stTabs"] [role="tab"] {
-    color: var(--muted) !important;
-    background: transparent !important;
-}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-    color: var(--primary) !important;
-    border-bottom-color: var(--primary) !important;
-}
-div[data-testid="stVerticalBlockBorderWrapper"] { background: var(--surface); border-color: var(--border) !important; border-radius: .7rem !important; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
-div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: .85rem 1rem !important; }
-
-/* Dashboard */
-.kpi-card { min-height: 7rem; padding: .85rem 1rem; background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--primary); border-radius: .65rem; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
-.kpi-title { color: var(--muted); font-size: .65rem; font-weight: 800; text-transform: uppercase; }
-.kpi-value { margin-top: .28rem; color: var(--text); font-size: 1.8rem; line-height: 1; font-weight: 790; }
-.kpi-context { margin-top: .45rem; color: var(--muted); font-size: .7rem; }
-.overview-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: .65rem; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: .65rem; }
-.overview-grid div { padding-left: .6rem; border-left: 2px solid var(--border-strong); }
-.overview-grid small { display:block; color:var(--muted); font-size:.66rem; }
-.overview-grid b { display:block; margin-top:.25rem; font-size:1.45rem; }
-.amber-text { color:var(--warning); } .green-text { color:var(--success); } .blue-text { color:var(--info); }
-
-/* Table */
-.patient-table-header { display:grid; grid-template-columns:2.2fr 1.15fr 1.7fr 1.55fr 1.05fr 1.15fr; min-width:790px; padding:.45rem .5rem; border-bottom:1px solid var(--border-strong); color:var(--muted); font-size:.72rem; font-weight:800; text-transform:uppercase; }
-.patient-cell, .table-two-line { display:flex; min-height:2.45rem; flex-direction:column; justify-content:center; gap:.2rem; line-height:1.15; }
-.patient-cell b { overflow-wrap:anywhere; font-size:.86rem; }
-.patient-cell small, .table-two-line small, .table-meta { color:var(--muted); font-size:.71rem; }
-.status-pill { display:inline-flex; align-items:center; justify-content:center; padding:.28rem .52rem; border-radius:999px; font-size:.67rem; font-weight:800; }
-.status-pending { color:var(--warning); background:var(--warning-soft); }
-.status-approved { color:var(--success); background:var(--success-soft); }
-.table-row-rule { height:1px; background:var(--border); }
-.pagination-label { padding-top:.55rem; color:var(--muted); font-size:.7rem; text-align:center; }
-
-/* Review and graph */
-.workflow-steps { display:flex; flex-wrap:wrap; margin:.25rem 0 .55rem; color:var(--muted); font-size:.72rem; }
-.workflow-steps span, .workflow-steps b { padding:.45rem 1rem; border-bottom:2px solid var(--border); }
-.workflow-steps b { color:var(--primary); border-color:var(--primary); }
-.recording-prompt { margin-top:.25rem; padding:.65rem; text-align:center; color:var(--muted); background:var(--surface-soft); border:1px dashed var(--border-strong); border-radius:.5rem; font-size:.72rem; }
-.audit-note { padding-bottom:.3rem; color:var(--muted); font-size:.68rem; }
-.summary-text { margin:.12rem 0 .55rem; white-space:pre-wrap; color:var(--text); font-size:.76rem; line-height:1.45; }
-.insight-scroll { max-height:16rem; overflow-y:auto; padding-right:.2rem; }
-.insight-category { margin:.55rem 0; }
-.insight-category-heading { margin-bottom:.28rem; color:var(--muted); font-size:.64rem; font-weight:800; text-transform:uppercase; }
-.insight-category-items { display:flex; flex-wrap:wrap; gap:.32rem; }
-.insight-chip { display:inline-flex; padding:.32rem .5rem; border:1px solid var(--border); border-radius:999px; background:transparent; }
-.insight-chip b { font-size:.68rem; }
-.insight-diagnosis { background:transparent; border-color:#fecaca; }
-.insight-symptom { background:transparent; border-color:#fcd34d; }
-.insight-risk { background:transparent; border-color:#fdba74; }
-.insight-procedure { background:transparent; border-color:#93c5fd; }
-.clinical-graph-v2 { padding:1rem; background:var(--surface); border:1px solid var(--border); border-radius:.65rem; }
-.graph-hierarchy-v2 { display:flex; flex-direction:column; align-items:center; gap:.6rem; }
-.graph-patient-card { max-width:80%; padding:.48rem .8rem; border-radius:.48rem; background:var(--primary); color:#fff; font-size:.73rem; font-weight:750; text-align:center; }
-.graph-connector-main { width:2px; height:.8rem; background:var(--border-strong); }
-.graph-categories { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; gap:.5rem; }
-.graph-category-header { margin-bottom:.35rem; color:var(--muted); font-size:.58rem; font-weight:800; text-align:center; text-transform:uppercase; }
-.graph-category-content { display:flex; flex-direction:column; gap:.3rem; }
-.graph-node-card, .graph-empty-state { padding:.52rem .4rem; border-radius:.42rem; font-size:.68rem; line-height:1.25; text-align:center; overflow-wrap:anywhere; }
-.graph-node-diagnosis { background:var(--purple); color:#fff; }
-.graph-node-symptom { background:var(--info); color:#fff; }
-.graph-node-risk { background:var(--warning); color:#fff; }
-.graph-empty-state { color:var(--muted); border:1px dashed var(--border-strong); }
-.code-table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:.55rem; background:#fff; }
-.code-table { width:100%; border-collapse:collapse; background:#fff; color:#17212b; font-size:.78rem; }
-.code-table th { padding:.65rem .55rem; background:#f1f5f9; color:#334155; border-bottom:1px solid #cbd5e1; text-align:left; font-weight:750; }
-.code-table td { padding:.65rem .55rem; background:#fff; color:#17212b; border-bottom:1px solid #e2e8f0; }
-.code-table tr:last-child td { border-bottom:0; }
-
-/* Codes */
-.code-hero { padding:1rem 1.1rem; background:linear-gradient(135deg,#ecfdf5,#f0fdfa); border:1px solid #99f6e4; border-radius:.7rem; }
-.code-hero-title { font-size:1rem; font-weight:780; color:#115e59; }
-.code-hero-text { margin-top:.25rem; color:#47706d; font-size:.75rem; }
-.code-patient { color:var(--text) !important; }
-.code-patient { margin-top:.65rem; font-size:.78rem; color:var(--text); }
-.code-empty { padding:1.2rem; text-align:center; color:var(--muted); background:var(--surface-soft); border:1px dashed var(--border-strong); border-radius:.55rem; }
-
-@media (max-width:760px) {
-    .block-container { padding:3.8rem .75rem .75rem !important; }
-    .page-heading { font-size:1.35rem; }
-    .overview-grid { grid-template-columns:1fr; }
-    .graph-node-card, .graph-empty-state { font-size:.56rem; }
-}
-
-[data-testid="collapsedControl"] {
-    color: #ffffff !important;
-    background-color: #111111 !important;
-    border: 1px solid #111111 !important;
-    border-radius: 4px !important;
-    opacity: 1 !important;
-}
-[data-testid="collapsedControl"] button {
-    color: #ffffff !important;
-    background-color: #111111 !important;
-    border: 0 !important;
-    min-width: 2.25rem !important;
-    min-height: 2.25rem !important;
-    opacity: 1 !important;
-}
-[data-testid="collapsedControl"] svg {
-    fill: #ffffff !important;
-    color: #ffffff !important;
-    stroke: #ffffff !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="stSidebarCollapsedControl"] button,
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapseButton"] button {
-    background: #111111 !important;
-    color: #ffffff !important;
-    border: 1px solid #111111 !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="stSidebarCollapsedControl"] svg path,
-[data-testid="stSidebarCollapseButton"] svg,
-[data-testid="stSidebarCollapseButton"] svg path,
-[data-testid="collapsedControl"] svg path {
-    fill: #ffffff !important;
-    color: #ffffff !important;
-    stroke: #ffffff !important;
-    opacity: 1 !important;
-}
-/* Open sidebar: light control with a dark collapse icon. */
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapseButton"] button {
-    background: #f0f2f6 !important;
-    color: #333333 !important;
-    border: 1px solid #d3d3d3 !important;
-    border-radius: 4px !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebarCollapseButton"] svg,
-[data-testid="stSidebarCollapseButton"] svg path {
-    fill: #333333 !important;
-    color: #333333 !important;
-    stroke: #333333 !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebar"] {
-    background-color: #f8f9fa !important;
-    border-right: 1px solid #e9ecef !important;
-}
-[data-testid="stSidebar"] * {
-    color: #2d3748 !important;
-}
-[data-testid="stSidebar"] hr {
-    border-color: #e2e8f0 !important;
-}
-[data-testid="stSidebar"] .stButton > button:hover,
-[data-testid="stSidebar"] [aria-current="page"] {
-    color: #0f766e !important;
-    background-color: #e6fffb !important;
-    border-color: #99f6e4 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] {
-    background-color: #ffffff !important;
-    border: 1px solid #d3d3d3 !important;
-    border-radius: 4px !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] > div {
-    background-color: #ffffff !important;
-    color: #333333 !important;
-    border-color: #d3d3d3 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] span,
-[data-testid="stSidebar"] [data-baseweb="select"] input {
-    color: #333333 !important;
-    -webkit-text-fill-color: #333333 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="select"] svg {
-    fill: #333333 !important;
-    color: #333333 !important;
-    stroke: #333333 !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="popover"] > div,
-[data-testid="stSidebar"] [data-baseweb="popover"],
-[data-testid="stSidebar"] [role="listbox"] {
-    background-color: #ffffff !important;
-    color: #333333 !important;
-    border-color: #d3d3d3 !important;
-}
-[data-testid="stSidebar"] [data-baseweb="popover"] *,
-[data-testid="stSidebar"] [role="option"] {
-    color: #333333 !important;
-}
-/* Streamlit may render the open select menu in a portal outside the sidebar. */
-body [role="listbox"],
-body [role="listbox"] [role="option"],
-body [data-baseweb="popover"],
-body [data-baseweb="popover"] > div,
-body .react-aria-Popover,
-body .react-aria-ListBox,
-body .react-aria-ListBox [role="option"] {
-    background: #ffffff !important;
-    color: #333333 !important;
-    border-color: #d3d3d3 !important;
-}
-body [role="listbox"] *,
-body [data-baseweb="popover"] *,
-body .react-aria-Popover *,
-body .react-aria-ListBox * {
-    color: #333333 !important;
-    -webkit-text-fill-color: #333333 !important;
-}
-[data-testid="stSidebar"] .react-aria-ComboBox,
-[data-testid="stSidebar"] .react-aria-ComboBox [role="group"] {
-    background: #ffffff !important;
-    border: 1px solid #d3d3d3 !important;
-    border-radius: 4px !important;
-    color: #333333 !important;
-}
-[data-testid="stSidebar"] .react-aria-ComboBox input,
-[data-testid="stSidebar"] .react-aria-ComboBox input[role="combobox"] {
-    background: #ffffff !important;
-    color: #333333 !important;
-    -webkit-text-fill-color: #333333 !important;
-    border: 0 !important;
-    box-shadow: none !important;
-}
-[data-testid="stSidebar"] .react-aria-ComboBox button,
-[data-testid="stSidebar"] .react-aria-ComboBox button[aria-label="Open"] {
-    background: #ffffff !important;
-    color: #333333 !important;
-    border: 0 !important;
-    box-shadow: none !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebar"] .react-aria-ComboBox button svg {
-    fill: #333333 !important;
-    color: #333333 !important;
-    stroke: #333333 !important;
-    opacity: 1 !important;
-}
-[data-testid="stSidebar"] [role="listbox"] {
-    background: #ffffff !important;
-    color: #333333 !important;
-    border: 1px solid #d3d3d3 !important;
-}
-</style>
-""".replace("{theme_vars}", theme_vars).replace("{header_background}", header_background),
-    unsafe_allow_html=True,
-)
+apply_theme(theme_name)
 
 
 # ============================================================
 # 3. DATABASE AND SESSION STATE
 # ============================================================
 def load_db():
-    if not DB_FILE.exists():
-        return []
-    try:
-        with DB_FILE.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-            return payload.get("records", []) if isinstance(payload, dict) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+    return load_records(DB_FILE)
 
 
 def save_db(records):
-    with DB_FILE.open("w", encoding="utf-8") as file:
-        json.dump({"records": records}, file, indent=4, ensure_ascii=False)
+    save_records(DB_FILE, records)
 
 
 def initialize_state():
     defaults = {
-        "records": load_db(),
+        "records": None,
         "page": "dashboard",
         "current_record": None,
         "dash_page": 1,
@@ -584,159 +111,25 @@ def initialize_state():
         "generated_bill": None,
         "generated_bill_record_id": None,
         "generated_bill_patient_id": None,
+        "generated_bill_signature": None,
+        "bill_validation_signature": None,
+        "bill_validation_errors": None,
     }
+    if "records" not in st.session_state:
+        try:
+            st.session_state.records = load_db()
+        except RuntimeError as error:
+            st.error(
+                f"{error} No consultation data was changed. Repair the file before "
+                "continuing so the app cannot overwrite it with an empty record set."
+            )
+            st.stop()
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
 initialize_state()
-
-MASTER_INSIGHTS = [
-    "None", "Diabetes (Type 2)", "Hypertension", "Hyperlipidemia", "Asthma",
-    "Osteoarthritis", "Obesity", "Smoking History", "Alcohol Use", "Anxiety",
-    "Depression", "Fever", "Chronic Cough", "Fatigue", "Headache", "Chest Pain",
-    "Nausea", "Color Blindness", "Complete Blood Count", "A1C Test", "Chest X-ray",
-    "CT Scan", "MRI", "Ultrasound", "Blood Glucose Test",
-]
-
-
-def get_detected_insights(transcript_text):
-    text = (transcript_text or "").lower()
-    keyword_map = {
-        "diabetes": "Diabetes (Type 2)", "hypertension": "Hypertension", "high bp": "Hypertension",
-        "cholesterol": "Hyperlipidemia", "asthma": "Asthma", "arthritis": "Osteoarthritis",
-        "obesity": "Obesity", "smok": "Smoking History", "alcohol": "Alcohol Use",
-        "anxiety": "Anxiety", "depression": "Depression", "fever": "Fever",
-        "cough": "Chronic Cough", "fatigue": "Fatigue", "headache": "Headache",
-        "chest pain": "Chest Pain", "nausea": "Nausea", "color blind": "Color Blindness",
-        "complete blood count": "Complete Blood Count", "cbc": "Complete Blood Count",
-        "a1c": "A1C Test", "hba1c": "A1C Test", "chest x-ray": "Chest X-ray",
-        "chest x ray": "Chest X-ray", "ct scan": "CT Scan", "mri": "MRI",
-        "ultrasound": "Ultrasound", "blood glucose": "Blood Glucose Test",
-        "physical therapy": "Physical Therapy", "physiotherapy": "Physical Therapy",
-        "injection": "Injection", "injections": "Injection",
-    }
-    return list(dict.fromkeys(value for keyword, value in keyword_map.items() if keyword in text))
-
-
-def get_record_insights(record):
-    transcript_insights = get_detected_insights(record.get("transcript", ""))
-    manual_insights = record.get("manual_insights", [])
-    return list(dict.fromkeys(
-        transcript_insights
-        + [item for item in manual_insights if item != "None"]
-        + ["Established Patient Office Visit"]
-    ))
-
-
-def get_code_suggestions(insights, documentation=None):
-    """Return separate ICD/CPT suggestions, using documentation context when supplied."""
-    st.session_state.code_generation_error = ""
-
-    if classify_medical_item is None or get_icd10_codes is None or get_cpt_codes is None:
-        st.session_state.code_generation_error = (
-            "code_matcher.py could not be imported. Keep code_matcher.py either in the "
-            "frontend package or in the same directory as this Streamlit file."
-        )
-        return {"icd10": [], "cpt": []}
-
-    candidates = list(dict.fromkeys(
-        str(item).strip() for item in insights if item and item != "None"
-    ))
-    if not candidates:
-        st.session_state.code_generation_error = "No codable clinical insights were detected."
-        return {"icd10": [], "cpt": []}
-
-    icd_items = []
-    cpt_items = []
-    classification_errors = []
-
-    procedure_terms = (
-        "test", "x-ray", "x ray", "scan", "mri", "ultrasound",
-        "blood", "cbc", "a1c", "hba1c", "procedure", "office visit"
-    )
-
-    for item in candidates:
-        try:
-            item_type = str(classify_medical_item(item) or "").strip().lower()
-        except Exception as error:
-            classification_errors.append(f"{item}: {error}")
-            item_type = ""
-
-        if item_type in {"cpt", "hcpcs", "procedure"}:
-            cpt_items.append(item)
-        elif item_type in {"icd10", "icd-10", "icd", "diagnosis"}:
-            icd_items.append(item)
-        elif any(term in item.lower() for term in procedure_terms):
-            cpt_items.append(item)
-        else:
-            # Diagnoses, symptoms, and risk factors should be evaluated for ICD-10.
-            icd_items.append(item)
-
-    try:
-        documentation_text = str(documentation or "").lower()
-        if "chest x-ray" in documentation_text or "chest x ray" in documentation_text:
-            has_multiple_views = any(
-                phrase in documentation_text
-                for phrase in ("1-2 view", "1 to 2 view", "two view", "2 view")
-            )
-            if has_multiple_views:
-                cpt_items = [
-                    item for item in cpt_items
-                    if "chest x-ray" not in item.lower() and "chest x ray" not in item.lower()
-                ]
-                cpt_items.append("Chest x ray 2 views")
-        if documentation is not None and get_icd10_candidate_sets and get_cpt_candidate_sets:
-            evidence = {item: documentation for item in icd_items}
-            icd_details = get_icd10_candidate_sets(icd_items, threshold=80, evidence_by_term=evidence)
-            icd_results = [
-                {
-                    "Extracted Condition": item["term"],
-                    "Matched Disease/Injury": item["selected_description"],
-                    "ICD-10 Code": item["selected_code"],
-                }
-                for item in icd_details
-                if item["status"] == "suggested"
-            ]
-            # Keep procedure candidates visible for clinician review. Whether a
-            # service was actually performed must be confirmed before billing.
-            cpt_details = get_cpt_candidate_sets(cpt_items, documentation, threshold=80)
-            cpt_results = [
-                {
-                    "Extracted Procedure": item["term"],
-                    "Matched Procedure/Service": item["selected_description"],
-                    "CPT/HCPCS Code": item["selected_code"],
-                }
-                for item in cpt_details
-                if item["status"] == "suggested"
-            ]
-        else:
-            icd_results = get_icd10_codes(icd_items, threshold=80) if icd_items else []
-            cpt_results = get_cpt_codes(cpt_items, threshold=80) if cpt_items else []
-    except Exception as error:
-        st.session_state.code_generation_error = f"Code matching failed: {error}"
-        return {"icd10": [], "cpt": []}
-
-    if classification_errors:
-        st.session_state.code_generation_error = (
-            "Some items could not be classified automatically: "
-            + "; ".join(classification_errors)
-        )
-    elif not icd_results and not cpt_results:
-        st.session_state.code_generation_error = (
-            "The matcher loaded correctly, but no entries met the 80% similarity threshold. "
-            "Check the terms and code datasets loaded by code_matcher.py."
-        )
-
-    return {"icd10": icd_results or [], "cpt": cpt_results or []}
-
-
-def get_backend_code_suggestions(insights, documentation=""):
-    """Generate codes locally without an avoidable HTTP round trip."""
-    return get_code_suggestions(insights, documentation)
-
-
 
 # ============================================================
 # 4. REUSABLE COMPONENTS
@@ -786,16 +179,61 @@ def render_sidebar(active_page):
             if active_page == page_key:
                 st.markdown('<div class="nav-active-marker"></div>', unsafe_allow_html=True)
 
+        try:
+            directory_patients = HealthcareApiClient().list_patients()
+        except (RuntimeError, requests.exceptions.RequestException) as error:
+            directory_patients = []
+            st.warning(f"Patient directory is unavailable: {error}")
+        if directory_patients:
+            directory_by_id = {
+                str(patient.get("Patient_ID", "")): patient
+                for patient in directory_patients
+                if patient.get("Patient_ID")
+            }
+            directory_ids = list(directory_by_id)
+
+            def open_directory_patient():
+                patient_id = st.session_state.get("sidebar_patient_id", "")
+                patient = directory_by_id.get(patient_id)
+                if patient:
+                    st.session_state.page = "ehr_data"
+                    st.session_state.ehr_demo_patient = (
+                        f"{patient_id} · {patient.get('Legal_Name', 'Unknown patient')}"
+                    )
+
+            if st.session_state.get("sidebar_patient_id") not in directory_by_id:
+                st.session_state.sidebar_patient_id = directory_ids[0]
+            with st.expander(f"Patient directory · {len(directory_ids)}", expanded=False):
+                st.selectbox(
+                    "Patient and insurance payer",
+                    directory_ids,
+                    key="sidebar_patient_id",
+                    format_func=lambda patient_id: (
+                        f"{directory_by_id[patient_id].get('Legal_Name', patient_id)} · "
+                        f"{directory_by_id[patient_id].get('Payer_Name') or 'Payer not assigned'}"
+                    ),
+                    on_change=open_directory_patient,
+                    label_visibility="collapsed",
+                )
+
         st.markdown('<div class="shell-divider"></div><div class="shell-section-label">UTILITY</div>', unsafe_allow_html=True)
         selected_theme = st.selectbox("Theme", ["Light", "Dark"], key="theme_selector_v2")
         if st.session_state.get("theme") != selected_theme:
             st.session_state.theme = selected_theme
             st.rerun()
-        st.button("Settings", key="nav_settings", use_container_width=True)
-        st.button("Help", key="nav_help", use_container_width=True)
+        with st.expander("Help & safety", expanded=False):
+            st.caption(
+                "Educational demo only. Do not enter real patient information. "
+                "Consultation audio is processed by Google Speech Recognition, "
+                "and transcripts are sent to the configured backend and model."
+            )
+            st.markdown(
+                "Use **Consultations** to create a note, **Clinical Review** to "
+                "review it, and **Codes** to inspect coding and bill estimates."
+            )
         st.markdown(
-            '<div class="shell-user"><div class="user-avatar">AP</div>'
-            '<div><b>NuuCare User</b><small>Clinical Operations</small></div></div>',
+            '<div class="shell-user"><div class="user-avatar">DE</div>'
+            '<div><b>Demo User</b><small>Clinical Operations</small></div></div>',
             unsafe_allow_html=True,
         )
 
@@ -991,17 +429,73 @@ def render_summary(summary):
         st.markdown(f'<div class="summary-text">{escape(value)}</div>', unsafe_allow_html=True)
 
 
-def render_cds_recommendations(recommendations):
+def split_cds_recommendations(recommendations):
     text = clean_clinical_text(recommendations)
     sections = {"Recommendation": "", "Reasoning": "", "Safety Note": ""}
-    pattern = r"(?im)^\s*#{0,6}\s*(Recommendation|Reasoning|Safety Note)\s*:?\s*$"
-    matches = list(re.finditer(pattern, text))
-    if matches:
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            sections[match.group(1).title()] = text[match.end():end].strip()
-    else:
+    heading_pattern = re.compile(
+        r"^\s*(?:#{1,6}\s*)?(?:\d+[.)]\s*)?(?:\*\*|__)?"
+        r"(Clinical Context|Clinical Recommendation|Recommendation|"
+        r"Reasoning|Evidence and Citations|Evidence|"
+        r"Considerations for Clinician Review|Considerations|"
+        r"Missing Information|Safety Note)"
+        r"(?:\*\*|__)?\s*:?\s*(.*?)\s*$",
+        re.IGNORECASE,
+    )
+    recommendation_parts = []
+    current_section = None
+    current_title = ""
+    current_lines = []
+    preamble = []
+
+    def save_current():
+        content = "\n".join(current_lines).strip()
+        if not content:
+            return
+        if current_section == "Reasoning":
+            sections["Reasoning"] = "\n\n".join(
+                part for part in (sections["Reasoning"], content) if part
+            )
+        elif current_section == "Safety Note":
+            sections["Safety Note"] = "\n\n".join(
+                part for part in (sections["Safety Note"], content) if part
+            )
+        else:
+            title = current_title if current_section != "Recommendation" else ""
+            recommendation_parts.append(
+                f"### {title}\n\n{content}" if title else content
+            )
+
+    for line in text.splitlines():
+        match = heading_pattern.match(line)
+        if match:
+            save_current()
+            title = match.group(1).strip()
+            normalized_title = title.lower()
+            if normalized_title in {"reasoning"}:
+                current_section = "Reasoning"
+            elif normalized_title == "safety note":
+                current_section = "Safety Note"
+            else:
+                current_section = "Recommendation"
+            current_title = title
+            current_lines = [match.group(2)] if match.group(2) else []
+        elif current_section:
+            current_lines.append(line)
+        else:
+            preamble.append(line)
+    save_current()
+
+    preamble_text = "\n".join(preamble).strip()
+    if preamble_text:
+        recommendation_parts.insert(0, preamble_text)
+    sections["Recommendation"] = "\n\n".join(recommendation_parts).strip()
+    if not sections["Recommendation"] and not sections["Reasoning"] and not sections["Safety Note"]:
         sections["Recommendation"] = text
+    return sections
+
+
+def render_cds_recommendations(recommendations):
+    sections = split_cds_recommendations(recommendations)
     tabs = st.tabs(list(sections.keys()))
     for tab, (label, content) in zip(tabs, sections.items()):
         with tab:
@@ -1045,6 +539,78 @@ def render_transcript(record, read_only=False):
             column_config={"Speaker": st.column_config.SelectboxColumn("Speaker", options=[doctor, patient, "Unknown"], required=True), "Text": st.column_config.TextColumn("Spoken Text", width="large")})
 
 
+def _chart_review_rows(sheet_name, entries):
+    rows = []
+    for item in entries:
+        if sheet_name == "Problems":
+            description = item.get("Problem_Name", "")
+            code = item.get("ICD_10_CM", "")
+            date = item.get("Onset_Date", "")
+        elif sheet_name == "Allergies":
+            description = " · ".join(
+                str(value) for value in (
+                    item.get("Substance", ""),
+                    item.get("Reaction", ""),
+                    item.get("Severity", ""),
+                ) if value
+            )
+            code = item.get("Category", "")
+            date = item.get("Recorded_Date", "")
+        elif sheet_name == "Medications":
+            description = " · ".join(
+                str(value) for value in (
+                    item.get("Medication", ""),
+                    item.get("Dose", ""),
+                    item.get("Route", ""),
+                    item.get("Frequency", ""),
+                ) if value
+            )
+            code = item.get("Indication_ICD_10", "")
+            date = item.get("Start_Date", "")
+        elif sheet_name == "Vitals":
+            measurements = (
+                ("BP", (
+                    f'{item.get("Systolic_mmHg", "")}/'
+                    f'{item.get("Diastolic_mmHg", "")} mmHg'
+                ) if item.get("Systolic_mmHg") or item.get("Diastolic_mmHg") else ""),
+                ("HR", f'{item.get("Heart_Rate_bpm")} bpm' if item.get("Heart_Rate_bpm") else ""),
+                ("RR", f'{item.get("Respiratory_Rate")} /min' if item.get("Respiratory_Rate") else ""),
+                ("SpO2", f'{item.get("SpO2_Percent")}%' if item.get("SpO2_Percent") else ""),
+                ("Temp", f'{item.get("Temperature_F")} F' if item.get("Temperature_F") else ""),
+                ("Weight", f'{item.get("Weight_kg")} kg' if item.get("Weight_kg") else ""),
+                ("Height", f'{item.get("Height_cm")} cm' if item.get("Height_cm") else ""),
+                ("BMI", item.get("BMI", "")),
+            )
+            description = " · ".join(
+                f"{label}: {value}" for label, value in measurements if value
+            )
+            code = ""
+            date = item.get("Observed_Date", "")
+        elif sheet_name == "Labs":
+            result = " ".join(
+                str(value) for value in (item.get("Result", ""), item.get("Unit", ""))
+                if value not in (None, "")
+            )
+            description = " · ".join(
+                str(value) for value in (item.get("Test_Name", ""), result) if value
+            )
+            code = item.get("LOINC_Code", "")
+            date = item.get("Result_Date", "")
+        else:
+            description = item.get("Order_Description", "")
+            code = item.get("CPT_HCPCS", "")
+            date = item.get("Order_Date", "")
+        rows.append(
+            {
+                "Description": description,
+                "Code": code,
+                "Date": date,
+                "Status": item.get("Clinical_Status") or item.get("Status", ""),
+            }
+        )
+    return rows
+
+
 # ============================================================
 # 5. DASHBOARD
 # ============================================================
@@ -1060,14 +626,29 @@ def show_patient_data():
         return
 
     sheets = payload.get("sheets", {})
-    st.caption(f"{len(patients)} synthetic patient chart(s) loaded from the backend. Changes are persisted in Epic_Inspired_USA_50_Patient_Demo.json.")
-    data_tab, bills_tab, chargemaster_tab = st.tabs(["Patient Data", "Bill History", "Original Chargemaster"])
+    insurance_records = sheets.get("Insurance", {}).get("records", [])
+    primary_coverage_by_patient = {}
+    for coverage in insurance_records:
+        if coverage.get("Status", "Active") != "Active":
+            continue
+        patient_key = str(coverage.get("Patient_ID", ""))
+        existing_coverage = primary_coverage_by_patient.get(patient_key)
+        if existing_coverage is None or coverage.get("Priority") == "Primary":
+            primary_coverage_by_patient[patient_key] = coverage
+    payer_by_patient = {
+        patient_id: str(coverage.get("Payer_Name", ""))
+        for patient_id, coverage in primary_coverage_by_patient.items()
+    }
+    st.caption(f"{len(patients)} synthetic patient chart(s) loaded from the backend. All active coverage uses Athena Health Insurance.")
+    data_tab, bills_tab, chargemaster_tab = st.tabs(["Patient Data", "Bill History", "Athena Charges"])
     with data_tab:
         with st.expander("Add patient", expanded=False):
             with st.form("add_demo_patient_form"):
                 first_col, last_col = st.columns(2)
                 first_name = first_col.text_input("First name")
                 last_name = last_col.text_input("Last name")
+                new_patient_payer = "Athena Health Insurance"
+                st.caption("Primary insurance payer: Athena Health Insurance")
                 dob_col, sex_col = st.columns(2)
                 dob = dob_col.date_input("Date of birth", value=datetime(1980, 1, 1).date())
                 sex_at_birth = sex_col.selectbox("Sex at birth", ["Female", "Male", "Other"])
@@ -1085,6 +666,7 @@ def show_patient_data():
                             "Sex_at_Birth": sex_at_birth,
                             "City": city,
                             "State": state,
+                            "Payer_Name": new_patient_payer,
                         }
                     )
                     st.session_state["ehr_demo_patient"] = f'{created["Patient_ID"]} · {created["Legal_Name"]}'
@@ -1096,26 +678,37 @@ def show_patient_data():
             st.info("No patient records are available.")
             return
         patient_options = {
-            f'{patient.get("Patient_ID", "")} · {patient.get("Legal_Name", "Unknown patient")}': patient
+            (
+                f'{patient.get("Patient_ID", "")} · {patient.get("Legal_Name", "Unknown patient")} · '
+                f'{payer_by_patient.get(str(patient.get("Patient_ID", ""))) or "Payer not assigned"}'
+            ): patient
             for patient in patients
         }
         selected_label = st.selectbox("Patient", list(patient_options), key="ehr_demo_patient")
         selected_patient = patient_options[selected_label]
         patient_id = str(selected_patient.get("Patient_ID", ""))
+        patient_payer = payer_by_patient.get(patient_id, "")
+        if patient_payer:
+            st.info(f"**Primary payer on file:** {patient_payer} · {primary_coverage_by_patient[patient_id].get('Plan_Type', '')}")
+        else:
+            st.warning("**Primary payer on file:** Not assigned. Choose a payer when generating a bill to add synthetic demo coverage.")
         try:
             chart = client.get_patient_chart(patient_id)
         except (RuntimeError, requests.exceptions.RequestException) as error:
             st.error(f"Patient chart could not be loaded: {error}")
             return
-        patient_sheets = list(chart.get("records", {}))
+        patient_sheets = [
+            name for name in chart.get("records", {}) if name != "Audit_Log"
+        ]
         encounter_count = len(chart.get("records", {}).get("Encounters", []))
         problem_count = len(chart.get("records", {}).get("Problems", []))
         medication_count = len(chart.get("records", {}).get("Medications", []))
-        metric_columns = st.columns(4)
+        metric_columns = st.columns(5)
         metric_columns[0].metric("Patient ID", patient_id)
         metric_columns[1].metric("Encounters", encounter_count)
         metric_columns[2].metric("Problems", problem_count)
         metric_columns[3].metric("Medications", medication_count)
+        metric_columns[4].metric("Primary Payer", patient_payer or "Not assigned")
 
         selected_sheet = st.selectbox(
             "Record type",
@@ -1124,7 +717,20 @@ def show_patient_data():
             key=f"ehr_data_sheet_{patient_id}",
         )
         patient_rows = chart.get("records", {}).get(selected_sheet, [])
-        frame = pd.DataFrame(patient_rows, columns=chart.get("headers", {}).get(selected_sheet, []))
+        patient_headers = chart.get("headers", {}).get(selected_sheet, [])
+        if selected_sheet == "Patient_Master":
+            patient_rows = [
+                {
+                    **row,
+                    "Payer_Name": payer_by_patient.get(str(row.get("Patient_ID", "")), ""),
+                    "Plan_Type": primary_coverage_by_patient.get(
+                        str(row.get("Patient_ID", "")), {}
+                    ).get("Plan_Type", ""),
+                }
+                for row in patient_rows
+            ]
+            patient_headers = [*patient_headers, "Payer_Name", "Plan_Type"]
+        frame = pd.DataFrame(patient_rows, columns=patient_headers)
         edited_frame = st.data_editor(
             frame,
             key=f"ehr_editor_{patient_id}_{selected_sheet}",
@@ -1132,15 +738,66 @@ def show_patient_data():
             hide_index=True,
             num_rows="fixed" if selected_sheet == "Patient_Master" else "dynamic",
             column_config={
-                "Patient_ID": st.column_config.TextColumn("Patient ID", disabled=True)
+                "Patient_ID": st.column_config.TextColumn("Patient ID", disabled=True),
+                "Payer_Name": st.column_config.TextColumn(
+                    "Primary Payer", disabled=True
+                ),
+                "Plan_Type": st.column_config.TextColumn("Plan", disabled=True),
             },
         )
+        audit_rows = list(reversed(chart.get("records", {}).get("Audit_Log", [])))
+        with st.expander(f"Audit evidence · {len(audit_rows)} EHR edit(s)"):
+            st.caption(
+                "Before/after snapshots are recorded by the backend when patient "
+                "demographics or linked records are changed. This demo log is not "
+                "tamper-proof and uses a demonstration actor label."
+            )
+            if audit_rows:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Time": row.get("Timestamp", ""),
+                                "Actor": row.get("Actor", ""),
+                                "Action": row.get("Action", ""),
+                                "Record type": row.get("Record_Type", ""),
+                                "Audit ID": row.get("Audit_ID", ""),
+                            }
+                            for row in audit_rows
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                selected_audit_index = st.selectbox(
+                    "Inspect EHR before/after values",
+                    range(len(audit_rows)),
+                    format_func=lambda index: (
+                        f'{audit_rows[index].get("Timestamp", "")} · '
+                        f'{audit_rows[index].get("Action", "")} · '
+                        f'{audit_rows[index].get("Record_Type", "")}'
+                    ),
+                    key=f"ehr_audit_{patient_id}",
+                )
+                st.json(
+                    {
+                        "before": audit_rows[selected_audit_index].get("Before", ""),
+                        "after": audit_rows[selected_audit_index].get("After", ""),
+                    }
+                )
+            else:
+                st.info("No EHR edits are recorded for this patient yet.")
         save_column, download_column = st.columns([1, 1])
         if save_column.button("Save changes to JSON", type="primary", key=f"ehr_save_{patient_id}_{selected_sheet}"):
             edited_records = json.loads(edited_frame.to_json(orient="records", date_format="iso"))
             try:
                 if selected_sheet == "Patient_Master":
-                    values = {key: value for key, value in edited_records[0].items() if key != "Patient_ID"}
+                    editable_headers = set(chart.get("headers", {}).get("Patient_Master", []))
+                    values = {
+                        key: value
+                        for key, value in edited_records[0].items()
+                        if key in editable_headers and key != "Patient_ID"
+                    }
                     client.update_patient(patient_id, values)
                 else:
                     client.replace_patient_records(patient_id, selected_sheet, edited_records)
@@ -1151,7 +808,7 @@ def show_patient_data():
         download_column.download_button(
             "Download current JSON",
             data=json.dumps(client.export_patient_data(), indent=2, ensure_ascii=False),
-            file_name="Epic_Inspired_USA_50_Patient_Demo.json",
+            file_name="Epic_Inspired_USA_50_Patient_Demo_Athena.json",
             mime="application/json",
             key=f"ehr_download_{patient_id}_{selected_sheet}",
         )
@@ -1168,6 +825,8 @@ def show_patient_data():
         generated_bill_ids = {str(item.get("Bill_ID", "")) for item in generated_bills}
         bill_history = []
         for bill in generated_bills:
+            if not is_bill_history_visible(bill.get("Payer_Name")):
+                continue
             bill_history.append(
                 {
                     "Record": bill.get("Bill_ID", ""),
@@ -1178,11 +837,16 @@ def show_patient_data():
                     "Date": bill.get("Generated_At", ""),
                     "Description": f'{bill.get("Encounter_Type", "Facility")} facility bill',
                     "Gross Charge (USD)": bill.get("Gross_Total_USD", 0),
+                    "Payer": bill.get("Payer_Name", ""),
+                    "Expected Allowed (USD)": bill.get("Expected_Allowed_Total_USD", ""),
+                    "Estimated Patient Share (USD)": bill.get("Patient_Responsibility_Total_USD", ""),
                     "Status": bill.get("Bill_Status") or "Draft",
                     "Bill ID": bill.get("Bill_ID", ""),
                 }
             )
         for claim in historical_claims:
+            if not is_bill_history_visible(claim.get("Payer")):
+                continue
             claim_id = str(claim.get("Claim_ID", ""))
             if any(claim_id.startswith(f'CLM-{bill_id.removeprefix("BILL-")}-') for bill_id in generated_bill_ids):
                 continue
@@ -1264,25 +928,70 @@ def show_patient_data():
                     st.dataframe(pd.DataFrame([detail]), use_container_width=True, hide_index=True)
 
     with chargemaster_tab:
-        source = PROJECT_ROOT.parent / "Original_Hospital_IPD_OPD_Charges_200_Demo.xlsx"
-        st.caption(f"Billing uses the IPD Encounter and CDM Master sheets in {source.name}; OPD CPT rates are also available.")
+        source = PROJECT_ROOT.parent / "Hospital_IPD_OPD_Charges_Athena_Only_Expanded.json"
+        st.caption(f"Billing uses Athena Health Insurance rates from the IPD and OPD records in {source.name}.")
         try:
-            charges = load_chargemaster()
-        except (OSError, ValueError, ImportError) as error:
-            st.error(f"Unable to load the original chargemaster: {error}")
+            with source.open("r", encoding="utf-8") as file:
+                charge_data = json.load(file)
+            charge_sheets = charge_data["sheets"]
+            inpatient_charges = _athena_charge_preview(charge_sheets["IPD Charges"]["records"])
+            outpatient_charges = _athena_charge_preview(charge_sheets["OPD Charges"]["records"])
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            st.error(f"Unable to load the Athena charge records: {error}")
         else:
-            if charges.empty:
-                st.info("No CPT/HCPCS-priced lines were found in the original chargemaster.")
-            else:
-                display_charges = charges.rename(
-                    columns={
-                        "code": "CPT/HCPCS",
-                        "rate": "Unit Charge (USD)",
-                        "quantity": "Quantity",
-                        "service_date": "Service Date",
-                    }
+            ipd_tab, opd_tab = st.tabs(["Inpatient (IPD)", "Outpatient (OPD)"])
+            display_columns = [
+                "CPT/HCPCS",
+                "Charge Description",
+                "Unit Charge ($)",
+                "Expected Allowed ($)",
+                "Patient Responsibility ($)",
+                "Charge Status",
+            ]
+            with ipd_tab:
+                st.dataframe(
+                    inpatient_charges.loc[:, [column for column in display_columns if column in inpatient_charges]],
+                    use_container_width=True,
+                    hide_index=True,
                 )
-                st.dataframe(display_charges, use_container_width=True, hide_index=True)
+            with opd_tab:
+                st.dataframe(
+                    outpatient_charges.loc[:, [column for column in display_columns if column in outpatient_charges]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
+def _athena_charge_preview(records):
+    charges = pd.DataFrame(records, dtype=object)
+    if "Payer" not in charges:
+        raise ValueError("Athena charge records are missing the Payer column.")
+    charges = charges.loc[
+        charges["Payer"].eq("Athena Health Insurance")
+    ].copy()
+    for index, row in charges.iterrows():
+        patient_share = row.get("Patient Responsibility ($)")
+        if isinstance(patient_share, str) and patient_share.startswith("="):
+            match = re.fullmatch(
+                r"=P\d+\*([0-9]+(?:\.[0-9]+)?)%", patient_share
+            )
+            if not match:
+                raise ValueError(f"Unsupported patient-share formula: {patient_share}")
+            charges.at[index, "Patient Responsibility ($)"] = round(
+                float(row["Expected Allowed ($)"]) * float(match.group(1)) / 100,
+                2,
+            )
+
+        adjustment = row.get("Contractual Adjustment ($)")
+        if isinstance(adjustment, str) and adjustment.startswith("="):
+            if not re.fullmatch(r"=O\d+-P\d+", adjustment):
+                raise ValueError(f"Unsupported contractual-adjustment formula: {adjustment}")
+            charges.at[index, "Contractual Adjustment ($)"] = round(
+                float(row["Unit Charge ($)"]) * float(row["Quantity"])
+                - float(row["Expected Allowed ($)"]),
+                2,
+            )
+    return charges
 
 
 def show_dashboard():
@@ -1461,8 +1170,12 @@ def show_new_consultation():
         st.markdown('<div class="section-title">Patient Information</div><div class="section-subtitle">Enter the basic context for this consultation</div>', unsafe_allow_html=True)
         try:
             demo_patients = HealthcareApiClient().list_patients()
-        except (RuntimeError, requests.exceptions.RequestException):
+        except (RuntimeError, requests.exceptions.RequestException) as error:
             demo_patients = []
+            st.warning(
+                "The EHR patient list is unavailable. You can continue with manual "
+                f"entry, but the consultation cannot link to an existing demo patient: {error}"
+            )
         demo_patient_options = {
             f'{patient.get("Patient_ID", "")} · {patient.get("Legal_Name", "Unknown patient")}': patient
             for patient in demo_patients
@@ -1500,7 +1213,12 @@ def show_new_consultation():
         patient_dob = left.text_input("Date of birth (YYYY-MM-DD)", value=default_dob, key=f"consult_patient_dob_{patient_widget_key}", disabled=bool(selected_demo_patient), placeholder="Required for a new Epic patient")
         doctor_name = right.text_input("Attending Doctor", placeholder="e.g. Dr. Sarah Jenkins")
     with st.container(border=True):
-        st.markdown('<div class="section-title">Record Consultation</div><div class="section-subtitle">Capture the clinical conversation securely</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Record Consultation</div><div class="section-subtitle">Create a synthetic demo encounter; audio is processed by an external speech-recognition service.</div>', unsafe_allow_html=True)
+        st.warning(
+            "Demo only — do not record or enter real protected health information. "
+            "Audio is sent to Google Speech Recognition; the transcript is sent "
+            "to the configured clinical backend and model."
+        )
         audio_file = st.audio_input("Record Audio", label_visibility="collapsed")
         st.markdown('<div class="recording-prompt">Audio input ready when you are</div>', unsafe_allow_html=True)
         if st.button(
@@ -1509,39 +1227,57 @@ def show_new_consultation():
             use_container_width=True,
             disabled=audio_file is None or not patient_name.strip() or not name_is_valid,
         ):
-            transcript = ""
             try:
                 with st.spinner("Transcribing audio..."):
                     recognizer = sr.Recognizer()
                     with sr.AudioFile(io.BytesIO(audio_file.getvalue())) as source:
-                        transcript = recognizer.recognize_google(recognizer.record(source))
+                        transcript = recognizer.recognize_google(
+                            recognizer.record(source)
+                        )
+            except (sr.UnknownValueError, sr.RequestError, OSError, ValueError) as error:
+                st.error(f"Audio could not be transcribed: {error}")
+            else:
                 with st.spinner("Generating clinical summary and CDS recommendations..."):
-                    st.session_state.scribe_result = HealthcareApiClient().analyze_encounter(transcript)
-                st.rerun()
-            except Exception as error:
-                if transcript:
-                    st.session_state.scribe_result = {
-                        "transcript": transcript,
-                        "soap_note": "",
-                        "patient_summary": "",
-                        "key_highlights": [],
-                        "retrieved_guidelines": "",
-                        "recommendations": "",
-                    }
-                    st.warning(
-                        "The clinical summary service is unavailable, so the transcript was kept. "
-                        f"Local ICD-10/CPT matching can still continue. Details: {error}"
-                    )
-                else:
-                    st.error(f"Unable to process the consultation: {error}")
+                    try:
+                        st.session_state.scribe_result = (
+                            HealthcareApiClient().analyze_encounter(transcript)
+                        )
+                    except (RuntimeError, requests.exceptions.RequestException) as error:
+                        st.session_state.scribe_result = {
+                            "transcript": transcript,
+                            "soap_note": "",
+                            "patient_summary": "",
+                            "key_highlights": [],
+                            "retrieved_guidelines": "",
+                            "recommendations": "",
+                        }
+                        st.warning(
+                            "The clinical summary service is unavailable, so the "
+                            "transcript was kept. Local ICD-10/CPT matching can still "
+                            f"continue. Details: {error}"
+                        )
+                    else:
+                        st.rerun()
         result = st.session_state.scribe_result
         if result:
+            generation_metadata = result.get("metadata", {})
+            if generation_metadata.get("soap_generation_status") == "transcript_fallback":
+                st.warning(
+                    "A structured SOAP response could not be obtained after retrying. "
+                    "A transcript-only note was prepared without adding clinical facts. "
+                    "Review it before saving."
+                )
             st.markdown('<div class="section-title">Transcript</div>', unsafe_allow_html=True)
             st.text_area("Generated transcript", value=result.get("transcript", ""), height=150, disabled=True, label_visibility="collapsed")
             st.markdown('<div class="section-title">Summary and Key Highlights</div>', unsafe_allow_html=True)
             render_summary(result.get("soap_note") or result.get("patient_summary", "Not available"))
             for highlight in result.get("key_highlights", []): st.markdown(f"- {highlight}")
-            if result.get("recommendations"):
+            if generation_metadata.get("cds_generation_status") == "unavailable":
+                st.warning(
+                    "The SOAP note is ready, but CDS could not be generated. "
+                    "The transcript is preserved; retry CDS from the review screen."
+                )
+            elif result.get("recommendations"):
                 st.success("Clinical Decision Support recommendations generated.")
                 with st.container(border=True):
                     st.markdown('<div class="section-title">Clinical Decision Support Recommendations</div><div class="section-subtitle">Evidence-based guidance for this encounter</div>', unsafe_allow_html=True)
@@ -1559,13 +1295,21 @@ def show_new_consultation():
                     if not encounter.get("recommendations"):
                         encounter = HealthcareApiClient().add_cds(encounter)
                 except (RuntimeError, requests.exceptions.HTTPError) as error:
+                    generation_metadata = dict(encounter.get("metadata", {}))
+                    generation_metadata["cds_generation_status"] = "unavailable"
+                    generation_metadata["cds_generation_error"] = str(error)
                     st.warning(
                         "Clinical decision support is unavailable, so the encounter will be saved "
                         f"without recommendations. Local ICD-10/CPT matching can still continue. Details: {error}"
                     )
+                else:
+                    generation_metadata = dict(encounter.get("metadata", {}))
+                    if encounter.get("recommendations"):
+                        generation_metadata["cds_generation_status"] = "generated"
+                        generation_metadata.pop("cds_generation_error", None)
                 transcript = encounter.get("transcript", "")
                 doctor, now = doctor_name.strip() or "Doctor", datetime.now()
-                record = {"id": f"PT-{str(uuid.uuid4().int)[:6]}", "name": patient_name.strip(), "age": patient_age.strip(), "gender": patient_gender, "doctor": doctor, "date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M"), "status": "Pending", "transcript": transcript, "transcript_data": parse_transcript_entries(transcript, doctor, patient_name.strip()), "summary": encounter.get("soap_note", ""), "patient_summary": encounter.get("patient_summary", ""), "key_highlights": encounter.get("key_highlights", []), "retrieved_guidelines": encounter.get("retrieved_guidelines", ""), "recommendations": encounter.get("recommendations", ""), "cds_requested": True, "analysis_version": ANALYSIS_VERSION, "dob": patient_dob.strip()}
+                record = {"id": f"PT-{str(uuid.uuid4().int)[:6]}", "name": patient_name.strip(), "age": patient_age.strip(), "gender": patient_gender, "doctor": doctor, "date": now.strftime("%d/%m/%Y"), "time": now.strftime("%H:%M"), "status": "Pending", "transcript": transcript, "transcript_data": parse_transcript_entries(transcript, doctor, patient_name.strip()), "summary": encounter.get("soap_note", ""), "patient_summary": encounter.get("patient_summary", ""), "key_highlights": encounter.get("key_highlights", []), "retrieved_guidelines": encounter.get("retrieved_guidelines", ""), "recommendations": encounter.get("recommendations", ""), "generation_metadata": generation_metadata, "cds_requested": True, "analysis_version": ANALYSIS_VERSION, "dob": patient_dob.strip()}
                 try:
                     register_consultation_in_ehr(record, patient=selected_demo_patient, dob=patient_dob.strip() or None)
                 except (RuntimeError, requests.exceptions.RequestException, ValueError) as error:
@@ -1591,6 +1335,12 @@ def show_review_note():
         go_to("dashboard"); st.rerun()
     title.markdown(f'<div class="page-heading">{escape(record.get("name", ""))}</div><div class="page-kicker">{escape(record.get("id", ""))} · {escape(str(record.get("age", "")))}y · {escape(record.get("gender", ""))} · {escape(record.get("doctor", "N/A"))}</div>', unsafe_allow_html=True)
     status.markdown(render_status_badge(record.get("status", "Pending")), unsafe_allow_html=True)
+    generation_metadata = record.get("generation_metadata") or {}
+    if generation_metadata.get("soap_generation_status") == "transcript_fallback":
+        st.warning(
+            "This SOAP note contains the source transcript in a structured shell "
+            "because automated SOAP extraction was unavailable. Verify it before approval."
+        )
     if st.session_state.last_record_id != record.get("id"):
         st.session_state.edit_summary = record.get("summary") or record.get("patient_summary", "")
         st.session_state.last_record_id = record.get("id")
@@ -1607,10 +1357,18 @@ def show_review_note():
                     try:
                         with st.spinner("Generating SOAP note..."):
                             regenerated = HealthcareApiClient().regenerate_encounter(record["transcript"])
+                        previous_soap = record.get("summary", "")
                         record["summary"] = regenerated.get("soap_note") or regenerated.get("patient_summary", "")
                         record["patient_summary"] = regenerated.get("patient_summary", "")
                         record["key_highlights"] = regenerated.get("key_highlights", [])
                         record["transcript"] = regenerated.get("transcript", record.get("transcript", ""))
+                        record["generation_metadata"] = regenerated.get("metadata", {})
+                        append_audit_event(
+                            record,
+                            "SOAP note regenerated",
+                            {"summary": previous_soap},
+                            {"summary": record["summary"]},
+                        )
                         update_ehr_clinical_note(record)
                         for index, existing in enumerate(st.session_state.records):
                             if existing.get("id") == record.get("id"):
@@ -1623,29 +1381,101 @@ def show_review_note():
                     except (RuntimeError, requests.exceptions.HTTPError) as error:
                         st.error(f"SOAP regeneration failed: {error}")
             with cds_col:
-                if not is_approved and st.button("Generate CDS", type="secondary", use_container_width=True, disabled=not record.get("transcript", "").strip()):
+                if not is_approved and st.button("Regenerate CDS from Transcript", type="secondary", use_container_width=True, disabled=not record.get("transcript", "").strip()):
                     try:
-                        with st.spinner("Generating CDS recommendations..."):
+                        with st.spinner("Regenerating CDS from the consultation transcript..."):
                             regenerated = HealthcareApiClient().regenerate_cds(record)
                         recommendations = regenerated.get("recommendations")
                         if not recommendations or not str(recommendations).strip():
                             raise RuntimeError("The CDS service returned no recommendation. The existing recommendation was kept.")
+                        previous_recommendation = record.get("recommendations", "")
                         record["retrieved_guidelines"] = regenerated.get("retrieved_guidelines", record.get("retrieved_guidelines", ""))
                         record["recommendations"] = recommendations
+                        generation_metadata = {
+                            **(record.get("generation_metadata") or {}),
+                            **regenerated.get("metadata", {}),
+                            "cds_generation_status": "generated",
+                        }
+                        generation_metadata.pop("cds_generation_error", None)
+                        record["generation_metadata"] = generation_metadata
                         record["cds_requested"] = True
                         record["analysis_version"] = ANALYSIS_VERSION
+                        append_audit_event(
+                            record,
+                            "CDS recommendation regenerated",
+                            {"recommendations": previous_recommendation},
+                            {"recommendations": recommendations},
+                        )
                         for index, existing in enumerate(st.session_state.records):
                             if existing.get("id") == record.get("id"):
                                 st.session_state.records[index] = record
                                 break
                         save_db(st.session_state.records)
-                        st.success("CDS recommendations generated.")
+                        st.success("CDS recommendations regenerated from the consultation transcript.")
                         st.rerun()
                     except (RuntimeError, requests.exceptions.HTTPError) as error:
                         st.error(f"CDS regeneration failed: {error}")
         with st.container(border=True):
             st.markdown('<div class="section-title">Clinical Decision Support Recommendations</div><div class="section-subtitle">Evidence-based guidance for this encounter</div>', unsafe_allow_html=True)
-            render_cds_recommendations(record.get("recommendations") or "Review the documented encounter and follow up based on clinical judgment.")
+            recommendations = str(record.get("recommendations") or "").strip()
+            if recommendations:
+                render_cds_recommendations(recommendations)
+                recommendation_review = record.get("recommendation_review", {})
+                if recommendation_review:
+                    st.info(
+                        f"Clinician review: {recommendation_review.get('decision', '').title()} · "
+                        f"{recommendation_review.get('reviewer', 'Reviewer')} · "
+                        f"{recommendation_review.get('reviewed_at', '')}"
+                    )
+                    if recommendation_review.get("rationale"):
+                        st.caption(f"Review rationale: {recommendation_review['rationale']}")
+                if not is_approved:
+                    decision_col, rationale_col, save_decision_col = st.columns([1.3, 3, 1.2])
+                    review_decision = decision_col.selectbox(
+                        "Recommendation decision",
+                        ["Pending", "Accepted", "Overridden"],
+                        index=(
+                            ["pending", "accepted", "overridden"].index(
+                                str(recommendation_review.get("decision", "pending")).lower()
+                            )
+                            if str(recommendation_review.get("decision", "pending")).lower()
+                            in {"pending", "accepted", "overridden"}
+                            else 0
+                        ),
+                        key=f"cds_decision_{record.get('id')}",
+                    )
+                    review_rationale = rationale_col.text_input(
+                        "Override rationale",
+                        value=str(recommendation_review.get("rationale", "")),
+                        key=f"cds_rationale_{record.get('id')}",
+                        disabled=review_decision != "Overridden",
+                    )
+                    if save_decision_col.button(
+                        "Save review",
+                        key=f"save_cds_review_{record.get('id')}",
+                        disabled=review_decision == "Pending",
+                    ):
+                        try:
+                            update_recommendation_review(
+                                record,
+                                review_decision,
+                                review_rationale,
+                            )
+                            for index, existing in enumerate(st.session_state.records):
+                                if existing.get("id") == record.get("id"):
+                                    st.session_state.records[index] = record
+                                    break
+                            save_db(st.session_state.records)
+                            st.success("Recommendation review decision saved with before/after audit evidence.")
+                            st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
+            else:
+                st.warning(
+                    "No CDS recommendations were returned for this encounter. "
+                    "Regenerate CDS from the transcript; do not treat this notice "
+                    "as clinical guidance."
+                )
         with st.container(border=True):
             st.markdown('<div class="section-title">Relationship Graph</div><div class="section-subtitle">Clinical relationships detected in this encounter</div>', unsafe_allow_html=True)
             render_clinical_graph(record.get("name", "Patient"), st.session_state.detected_insights)
@@ -1674,6 +1504,8 @@ def show_review_note():
                 if add_col.button("Add Insight", use_container_width=True, disabled=st.session_state.insight_count >= 6):
                     st.session_state.insight_count += 1; st.rerun()
                 def push_selected_insights_to_note():
+                    previous_summary = record.get("summary", "")
+                    previous_insights = list(record.get("manual_insights", []))
                     selected = [st.session_state.get(f"insight_{i}", "") for i in range(st.session_state.insight_count)]
                     manual_insights = record.setdefault("manual_insights", [])
                     for insight in selected:
@@ -1682,6 +1514,18 @@ def show_review_note():
                     st.session_state.edit_summary = append_selected_insights_to_note(st.session_state.edit_summary, selected)
                     record["summary"] = st.session_state.edit_summary
                     st.session_state.detected_insights = get_record_insights(record)
+                    append_audit_event(
+                        record,
+                        "Clinical insight added to note",
+                        {
+                            "summary": previous_summary,
+                            "manual_insights": previous_insights,
+                        },
+                        {
+                            "summary": record["summary"],
+                            "manual_insights": list(record.get("manual_insights", [])),
+                        },
+                    )
                     update_ehr_clinical_note(record)
                     for index, existing in enumerate(st.session_state.records):
                         if existing.get("id") == record.get("id"):
@@ -1694,21 +1538,79 @@ def show_review_note():
     def persist(approved=False):
         if record.get("status") == "Approved":
             return False
+        previous = {
+            "summary": record.get("summary", ""),
+            "transcript_data": record.get("transcript_data", []),
+            "status": record.get("status", "Pending"),
+        }
         record["summary"] = st.session_state.edit_summary
         record["transcript_data"] = edited_df.to_dict("records")
-        if approved:
-            record["status"] = "Approved"
-            record["approval_date"] = datetime.now().strftime("%d/%m/%Y")
         try:
             update_ehr_clinical_note(record, approved=approved)
         except (RuntimeError, requests.exceptions.RequestException) as error:
+            record["summary"] = previous["summary"]
+            record["transcript_data"] = previous["transcript_data"]
             st.error(f"The note could not be synchronized to Epic: {error}")
             return False
+        if approved:
+            record["status"] = "Approved"
+            record["approval_date"] = datetime.now().strftime("%d/%m/%Y")
+        append_audit_event(
+            record,
+            "Clinical note finalized" if approved else "Clinical note draft saved",
+            previous,
+            {
+                "summary": record.get("summary", ""),
+                "transcript_data": record.get("transcript_data", []),
+                "status": record.get("status", "Pending"),
+            },
+        )
         for index, existing in enumerate(st.session_state.records):
             if existing.get("id") == record.get("id"):
                 st.session_state.records[index] = record; break
         save_db(st.session_state.records)
         return True
+
+    audit_events = list(reversed(record.get("audit_log", [])))
+    with st.expander(f"Audit evidence and before/after history · {len(audit_events)} event(s)"):
+        st.caption(
+            "Local demonstration audit history. It records changes to the consultation "
+            "workspace and is not a tamper-proof or authenticated clinical audit system."
+        )
+        if audit_events:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Timestamp": event.get("timestamp", ""),
+                            "Actor": event.get("actor", ""),
+                            "Action": event.get("action", ""),
+                            "Rationale": event.get("rationale", ""),
+                        }
+                        for event in audit_events
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            selected_event = st.selectbox(
+                "Inspect before/after change",
+                range(len(audit_events)),
+                format_func=lambda index: (
+                    f"{audit_events[index].get('timestamp', '')} · "
+                    f"{audit_events[index].get('action', '')}"
+                ),
+                key=f"audit_event_{record.get('id')}",
+            )
+            st.json(
+                {
+                    "before": audit_events[selected_event].get("before", {}),
+                    "after": audit_events[selected_event].get("after", {}),
+                    "rationale": audit_events[selected_event].get("rationale", ""),
+                }
+            )
+        else:
+            st.info("No review edits have been recorded yet.")
     if record.get("status") == "Pending":
         st.divider()
         _, draft_col, final_col = st.columns([7, 1.5, 1.5], vertical_alignment="center")
@@ -1740,6 +1642,9 @@ def show_codes():
         st.session_state.generated_bill = None
         st.session_state.generated_bill_record_id = None
         st.session_state.generated_bill_patient_id = None
+        st.session_state.generated_bill_signature = None
+        st.session_state.bill_validation_signature = None
+        st.session_state.bill_validation_errors = None
 
     if not current or current.get("id") != record.get("id"):
         st.session_state.current_record = record
@@ -1767,14 +1672,15 @@ def show_codes():
         if generate_col.button("Regenerate Code Suggestions", type="primary", use_container_width=True, disabled=not insights):
             with st.spinner("Matching ICD-10 and CPT/HCPCS codes..."):
                 st.session_state.code_results = get_backend_code_suggestions(insights, record.get("transcript", ""))
+                signature = code_results_signature(record, insights)
                 st.session_state.code_record_id = record.get("id")
-                st.session_state.code_results_signature = tuple(insights)
+                st.session_state.code_results_signature = signature
                 st.session_state.code_matcher_version = CODE_MATCHER_VERSION
             st.rerun()
         if review_col.button("Return to Clinical Review", use_container_width=True):
             go_to("review"); st.rerun()
 
-    current_signature = tuple(insights)
+    current_signature = code_results_signature(record, insights)
     cached_results_are_stale = (
         st.session_state.code_record_id != record.get("id")
         or st.session_state.code_results_signature != current_signature
@@ -1818,47 +1724,172 @@ def show_codes():
             st.dataframe(pd.DataFrame(unified_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No diagnosis or procedure codes are available for this encounter.")
+    with st.expander("Coding evidence and provenance"):
+        st.caption(
+            f"Matcher version {CODE_MATCHER_VERSION}. Suggestions below were matched "
+            "from this saved transcript and detected clinical context; they require "
+            "professional review."
+        )
+        st.markdown("**Source transcript**")
+        st.text(record.get("transcript") or "No transcript is saved.")
+        st.markdown("**Detected context**")
+        st.write(insights or ["No clinical context was detected."])
+        if code_results.get("icd10") or code_results.get("cpt"):
+            st.markdown("**Candidate mapping evidence**")
+            st.json(
+                {
+                    "ICD-10-CM": code_results.get("icd10", []),
+                    "CPT/HCPCS": code_results.get("cpt", []),
+                }
+            )
 
     try:
         demo_patients = HealthcareApiClient().list_patients()
     except (RuntimeError, requests.exceptions.RequestException) as error:
         demo_patients = []
         st.error(f"EHR patients could not be loaded from the backend: {error}")
-    patient_lookup = {str(patient.get("Patient_ID", "")): patient for patient in demo_patients}
+    all_patient_lookup = {
+        str(patient.get("Patient_ID", "")): patient for patient in demo_patients
+    }
+    patient_lookup = {
+        str(patient.get("Patient_ID", "")): patient
+        for patient in billing_eligible_patients(demo_patients)
+    }
     patient_ids = list(patient_lookup)
-    linked_patient_id = str(record.get("patient_id", ""))
-    default_patient_id = linked_patient_id if linked_patient_id in patient_lookup else (patient_ids[0] if patient_ids else "")
+    stored_patient_id = str(record.get("patient_id", "")).strip()
+    linked_patient_id = linked_patient_id_for_record(record, patient_lookup)
+    matching_patient_ids = matching_patient_ids_for_record(record, patient_lookup)
+    default_patient_id = linked_patient_id or (
+        matching_patient_ids[0] if len(matching_patient_ids) == 1 else ""
+    )
     selected_patient_id = ""
     selected_bill_encounter = ""
     encounter_id = None
+    selected_payer = ""
+    current_bill_signature = None
     selected_patient_chart = {"records": {}}
     if patient_ids:
+        if (
+            not linked_patient_id
+            and stored_patient_id in all_patient_lookup
+            and is_seed_demo_patient(stored_patient_id)
+        ):
+            st.info(
+                "The original 50 demo patients are excluded from bill creation. "
+                "Select John F. Kennedy or a patient added after the demo set."
+            )
+        elif not linked_patient_id:
+            if matching_patient_ids:
+                st.warning(
+                    "The saved patient link is missing or mismatched. Select the matching EHR patient to repair the link."
+                )
+            else:
+                st.warning(
+                    f'{record.get("name", "This consultation")} is not in the current EHR dataset. '
+                    "Create a matching EHR patient before billing."
+                )
+                if st.button(
+                    f'Create EHR patient for {record.get("name", "this consultation")}',
+                    key=f"create_ehr_patient_{record.get('id', 'encounter')}",
+                ):
+                    record_to_register = dict(record)
+                    record_to_register["patient_id"] = ""
+                    record_to_register.pop("ehr_encounter_id", None)
+                    record_to_register.pop("ehr_note_id", None)
+                    record_to_register.pop("mrn", None)
+                    try:
+                        register_consultation_in_ehr(
+                            record_to_register,
+                            dob=record.get("dob"),
+                        )
+                        for index, existing in enumerate(st.session_state.records):
+                            if existing.get("id") == record.get("id"):
+                                st.session_state.records[index] = record_to_register
+                                break
+                        st.session_state.current_record = record_to_register
+                        save_db(st.session_state.records)
+                        st.rerun()
+                    except (RuntimeError, requests.exceptions.RequestException, ValueError) as error:
+                        st.error(f"The consultation could not be linked to a new EHR patient: {error}")
+
+        has_unambiguous_match = bool(default_patient_id)
         selected_patient_id = st.selectbox(
             "Bill for EHR patient",
-            patient_ids,
-            index=patient_ids.index(default_patient_id),
-            format_func=lambda patient_id: f'{patient_id} · {patient_lookup[patient_id].get("Legal_Name", "")}',
-            key=f"bill_patient_{record.get('id', 'encounter')}",
+            patient_ids if has_unambiguous_match else ["", *patient_ids],
+            index=patient_ids.index(default_patient_id) if has_unambiguous_match else 0,
+            format_func=lambda patient_id: (
+                "Select an EHR patient"
+                if not patient_id
+                else f'{patient_id} · {patient_lookup[patient_id].get("Legal_Name", "")} · '
+                f'{patient_lookup[patient_id].get("Payer_Name") or "Payer not assigned"}'
+            ),
+            key=f"bill_patient_v2_{record.get('id', 'encounter')}_{default_patient_id or 'unlinked'}",
         )
-        if not linked_patient_id:
-            st.caption("Register this consultation against the selected Epic patient to attach its codes and note to the bill.")
-            if st.button("Register this consultation in Epic", key=f"register_consult_{record.get('id', 'encounter')}"):
-                try:
-                    register_consultation_in_ehr(record, patient=patient_lookup[selected_patient_id])
-                    for index, existing in enumerate(st.session_state.records):
-                        if existing.get("id") == record.get("id"):
-                            st.session_state.records[index] = record
-                            break
-                    save_db(st.session_state.records)
-                    st.rerun()
-                except (RuntimeError, requests.exceptions.RequestException, ValueError) as error:
-                    st.error(f"Consultation could not be registered in Epic: {error}")
+        if not selected_patient_id:
+            st.selectbox(
+                "Insurance payer for this bill",
+                SUPPORTED_PAYER_OPTIONS,
+                index=0,
+                key=f"bill_payer_unlinked_{record.get('id', 'encounter')}",
+                help="Choose the payer rate sheet to use after the consultation is linked to its EHR patient.",
+            )
+            st.button(
+                "Generate Bill",
+                type="primary",
+                disabled=True,
+                key=f"generate_bill_unlinked_{record.get('id', 'encounter')}",
+            )
+            st.button(
+                "Validate Bill",
+                disabled=True,
+                key=f"validate_bill_unlinked_{record.get('id', 'encounter')}",
+                help="Generate and link a bill before validating it.",
+            )
+            st.info("Create the matching EHR patient or select and register an existing patient before billing.")
+            return
         try:
             selected_patient_chart = HealthcareApiClient().get_patient_chart(selected_patient_id)
         except (RuntimeError, requests.exceptions.RequestException) as error:
             selected_patient_chart = {"records": {}}
             st.error(f"Encounter list could not be loaded: {error}")
         patient_encounters = selected_patient_chart.get("records", {}).get("Encounters", [])
+        patient_notes = selected_patient_chart.get("records", {}).get("Clinical_Notes", [])
+        if (
+            not linked_patient_id
+            and patient_name_matches_record(record, patient_lookup[selected_patient_id])
+        ):
+            st.caption("Repair this consultation's EHR link to the matching patient before billing.")
+            if st.button(
+                "Link consultation to matching EHR patient",
+                key=f"link_consult_{selected_patient_id}_{record.get('id', 'encounter')}",
+            ):
+                record_to_register = dict(record)
+                record_to_register["patient_id"] = selected_patient_id
+                if not any(
+                    item.get("Encounter_ID") == record_to_register.get("ehr_encounter_id")
+                    for item in patient_encounters
+                ):
+                    record_to_register.pop("ehr_encounter_id", None)
+                    record_to_register.pop("ehr_note_id", None)
+                elif not any(
+                    item.get("Note_ID") == record_to_register.get("ehr_note_id")
+                    for item in patient_notes
+                ):
+                    record_to_register.pop("ehr_note_id", None)
+                try:
+                    register_consultation_in_ehr(
+                        record_to_register,
+                        patient=patient_lookup[selected_patient_id],
+                    )
+                    for index, existing in enumerate(st.session_state.records):
+                        if existing.get("id") == record.get("id"):
+                            st.session_state.records[index] = record_to_register
+                            break
+                    st.session_state.current_record = record_to_register
+                    save_db(st.session_state.records)
+                    st.rerun()
+                except (RuntimeError, requests.exceptions.RequestException, ValueError) as error:
+                    st.error(f"The consultation could not be linked to the matching EHR patient: {error}")
         encounter_lookup = {
             str(item.get("Encounter_ID", "")): item
             for item in patient_encounters
@@ -1898,51 +1929,325 @@ def show_codes():
                 ["Outpatient", "Inpatient"],
                 key=f"new_bill_encounter_type_{selected_patient_id}_{record.get('id', 'encounter')}",
             )
+        chart_records = selected_patient_chart.get("records", {})
+        selected_encounter = encounter_lookup.get(encounter_id or "", {})
+        encounter_notes = [
+            note for note in chart_records.get("Clinical_Notes", [])
+            if note.get("Encounter_ID") == encounter_id
+            and note.get("Note_Summary")
+        ]
+        with st.expander("Patient chart review", expanded=True):
+            st.markdown(
+                f"**{patient_lookup[selected_patient_id].get('Legal_Name', selected_patient_id)}** "
+                f"({selected_patient_id}) · Athena Health Insurance"
+            )
+            if encounter_id:
+                st.markdown(
+                    f"**Selected encounter:** {encounter_id} · "
+                    f"{selected_encounter.get('Type', 'Encounter')} · "
+                    f"{selected_encounter.get('Date', 'Date not recorded')} · "
+                    f"{selected_encounter.get('Status', 'Status not recorded')}"
+                )
+                st.markdown(
+                    "**Encounter assessment:** "
+                    + encounter_diagnosis_label(selected_encounter, encounter_notes)
+                )
+            if encounter_notes:
+                st.markdown("**Clinical documentation**")
+                for note in encounter_notes:
+                    note_meta = " · ".join(
+                        str(value)
+                        for value in (
+                            note.get("Note_Type"),
+                            note.get("Service_Date"),
+                            note.get("Status"),
+                        )
+                        if value
+                    )
+                    if note_meta:
+                        st.caption(note_meta)
+                    sections = soap_sections(note.get("Note_Summary", ""))
+                    if sections:
+                        for section in ("Subjective", "Objective", "Assessment", "Plan"):
+                            content = sections.get(section)
+                            if content:
+                                st.markdown(f"**{section}**")
+                                st.write(content)
+                    else:
+                        st.text(note.get("Note_Summary", ""))
+            elif encounter_id:
+                st.caption("No clinical note is linked to this encounter.")
+            chart_groups = [
+                ("Problems", "Problems"),
+                ("Allergies", "Allergies"),
+                ("Medications", "Medications"),
+                ("Vitals", "Vitals"),
+                ("Labs", "Labs"),
+                ("Orders and procedures", "Orders_Procedures"),
+            ]
+            displayed_groups = 0
+            for label, sheet_name in chart_groups:
+                entries = chart_records.get(sheet_name, [])
+                if encounter_id and sheet_name not in {"Problems", "Allergies", "Medications"}:
+                    entries = [
+                        item for item in entries
+                        if item.get("Encounter_ID") in {"", None, encounter_id}
+                    ]
+                if entries:
+                    displayed_groups += 1
+                    st.markdown(f"**{label} · {len(entries)}**")
+                    st.dataframe(
+                        pd.DataFrame(_chart_review_rows(sheet_name, entries)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            if not displayed_groups:
+                st.caption(
+                    "Encounter details are available in the linked clinical note above."
+                )
+        selected_payer = "Athena Health Insurance"
+        st.caption("Insurance payer for this bill: Athena Health Insurance")
         note_encounter_id = str(record.get("ehr_encounter_id", ""))
         use_note_codes = (
-            selected_patient_id == linked_patient_id
+            bool(linked_patient_id) and selected_patient_id == linked_patient_id
             and (encounter_id is None or not note_encounter_id or encounter_id == note_encounter_id)
         )
-        if not use_note_codes:
-            suggested_cpt_codes = [
-                str(item.get("CPT/HCPCS Code", ""))
-                for item in code_results.get("cpt", [])
-                if item.get("CPT/HCPCS Code")
-            ]
+        suggested_cpt_codes = [
+            str(item.get("CPT/HCPCS Code", ""))
+            for item in code_results.get("cpt", [])
+            if item.get("CPT/HCPCS Code")
+        ]
+        if linked_patient_id and not use_note_codes:
             use_note_codes = st.checkbox(
                 f"Apply this consultation's CPT codes to {patient_lookup[selected_patient_id].get('Legal_Name', selected_patient_id)}",
                 help="Use only when these reviewed codes belong to the selected patient's encounter.",
                 key=f"apply_consult_codes_{selected_patient_id}_{record.get('id', 'encounter')}",
             )
-        else:
-            suggested_cpt_codes = [
-                str(item.get("CPT/HCPCS Code", ""))
-                for item in code_results.get("cpt", [])
-                if item.get("CPT/HCPCS Code")
-            ]
         encounter_order_codes = [
             str(item.get("CPT_HCPCS", "")).strip()
             for item in selected_patient_chart.get("records", {}).get("Orders_Procedures", [])
             if item.get("Encounter_ID") == encounter_id and item.get("CPT_HCPCS")
         ]
-        codes_for_bill = suggested_cpt_codes if use_note_codes else encounter_order_codes
+        may_use_encounter_codes = bool(linked_patient_id) and selected_patient_id == linked_patient_id
+        codes_for_bill = (
+            suggested_cpt_codes
+            if use_note_codes
+            else encounter_order_codes if may_use_encounter_codes else []
+        )
+        query_encounter_id = encounter_id or str(record.get("ehr_encounter_id", ""))
+        query_code_options = ["General documentation clarification"] + [
+            f'{item.get("Code type", "")} {item.get("Code", "")} · '
+            f'{item.get("Purpose", "")}'
+            for item in unified_rows
+            if item.get("Code")
+        ]
+        with st.expander("Physician documentation query", expanded=False):
+            st.caption(
+                "Draft a neutral clarification for the provider. This tool does not "
+                "infer a diagnosis, alter a code, or send the query externally."
+            )
+            if not query_encounter_id:
+                st.info("Link this consultation to an EHR encounter before creating a query.")
+            else:
+                with st.form(f"physician_query_form_{record.get('id')}_{query_encounter_id}"):
+                    query_topic = st.selectbox(
+                        "Query topic",
+                        query_code_options,
+                        key=f"physician_query_topic_{record.get('id')}",
+                    )
+                    query_question = st.text_area(
+                        "Neutral clarification question",
+                        placeholder="Enter a non-leading question for the treating provider.",
+                        key=f"physician_query_question_{record.get('id')}",
+                    )
+                    query_indicators = st.text_area(
+                        "Documented clinical indicators",
+                        value=str(record.get("summary") or record.get("transcript") or ""),
+                        key=f"physician_query_indicators_{record.get('id')}",
+                        help="Use documented facts only. Verify the selected text before saving.",
+                    )
+                    query_options = st.text_input(
+                        "Provider response options (optional)",
+                        placeholder="For example: clinically supported / not supported / unable to determine",
+                        key=f"physician_query_options_{record.get('id')}",
+                    )
+                    save_query = st.form_submit_button("Save query draft")
+                if save_query:
+                    try:
+                        create_physician_query(
+                            record,
+                            selected_patient_id,
+                            query_encounter_id,
+                            query_topic,
+                            query_question,
+                            query_indicators,
+                            query_options,
+                        )
+                        save_db(st.session_state.records)
+                        st.success("Physician query draft saved to the consultation record.")
+                        st.rerun()
+                    except ValueError as error:
+                        st.error(str(error))
+                saved_queries = [
+                    query for query in record.get("physician_queries", [])
+                    if query.get("patient_id") == selected_patient_id
+                    and query.get("encounter_id") == query_encounter_id
+                ]
+                if saved_queries:
+                    st.markdown("**Saved queries for this encounter**")
+                    for query in saved_queries:
+                        with st.container(border=True):
+                            st.markdown(
+                                f'**{query.get("status", "Draft")} · '
+                                f'{query.get("topic", "Documentation clarification")}**'
+                            )
+                            st.write(query.get("question", ""))
+                            st.caption(
+                                f'Clinical indicators: {query.get("clinical_indicators", "")}'
+                            )
+                            if query.get("response_options"):
+                                st.caption(f'Response options: {query["response_options"]}')
+                            if query.get("provider_response"):
+                                st.success(f'Provider response: {query["provider_response"]}')
+                            else:
+                                with st.form(
+                                    f"physician_query_response_{query.get('query_id')}"
+                                ):
+                                    response = st.text_area(
+                                        "Record provider response",
+                                        key=f"query_response_{query.get('query_id')}",
+                                    )
+                                    save_response = st.form_submit_button(
+                                        "Save provider response"
+                                    )
+                                if save_response:
+                                    try:
+                                        record_physician_query_response(
+                                            record,
+                                            query["query_id"],
+                                            response,
+                                        )
+                                        save_db(st.session_state.records)
+                                        st.success("Provider response recorded.")
+                                        st.rerun()
+                                    except (KeyError, ValueError) as error:
+                                        st.error(str(error))
+        services_confirmed_performed = False
+        if codes_for_bill:
+            attestation_encounter = encounter_id or f"new-{bill_encounter_type.lower()}"
+            attestation_codes = "-".join(codes_for_bill)
+            services_confirmed_performed = st.checkbox(
+                "I reviewed these CPT/HCPCS codes and confirm the services were performed and documented for this encounter.",
+                key=(
+                    f"bill_services_confirmed_{selected_patient_id}_"
+                    f"{record.get('id', 'encounter')}_{attestation_encounter}_"
+                    f"{attestation_codes}"
+                ),
+            )
+        icd10_codes_for_bill = (
+            [
+                str(item.get("ICD-10 Code", ""))
+                for item in code_results.get("icd10", [])
+                if item.get("ICD-10 Code")
+            ]
+            if use_note_codes
+            else []
+        )
         if not codes_for_bill:
-            st.warning("This encounter has no CPT/HCPCS orders. Select the checkbox above only if the displayed consultation codes belong to this patient.")
-        if st.button("Generate Bill", type="primary", disabled=not codes_for_bill):
+            if not linked_patient_id:
+                st.warning("Link this consultation to its EHR patient before generating a bill.")
+            else:
+                st.warning(
+                    "This encounter has no billable codes linked to the selected patient. "
+                    "Select the checkbox only if the displayed consultation codes belong to this patient."
+                )
+        current_bill_signature = (
+            str(record.get("id", "")),
+            selected_patient_id,
+            encounter_id or "",
+            bill_encounter_type,
+            selected_payer,
+            code_results_signature(record, insights),
+            tuple(icd10_codes_for_bill),
+            tuple(codes_for_bill),
+            services_confirmed_performed,
+        )
+        existing_bill = find_matching_bill(
+            selected_patient_chart.get("records", {}).get("Generated_Bills", []),
+            selected_patient_id,
+            encounter_id,
+            selected_payer,
+            codes_for_bill,
+        )
+        already_generated_for_context = bool(
+            (
+                st.session_state.generated_bill
+                and st.session_state.generated_bill_record_id == record.get("id")
+                and st.session_state.generated_bill_patient_id == selected_patient_id
+                and st.session_state.generated_bill_signature == current_bill_signature
+            )
+            or existing_bill
+        )
+        if already_generated_for_context:
+            if existing_bill:
+                with st.container(border=True):
+                    st.markdown("**Bill already generated**")
+                    bill_id_col, bill_status_col, bill_total_col = st.columns(3)
+                    bill_id_col.metric("Bill ID", existing_bill.get("Bill_ID", ""))
+                    bill_status_col.metric(
+                        "Status", existing_bill.get("Bill_Status", "Draft")
+                    )
+                    bill_total_col.metric(
+                        "Gross total",
+                        f'${float(existing_bill.get("Gross_Total_USD", 0) or 0):,.2f}',
+                    )
+                    saved_lines = [
+                        line for line in chart_records.get("Generated_Bill_Lines", [])
+                        if line.get("Bill_ID") == existing_bill.get("Bill_ID")
+                    ]
+                    if saved_lines:
+                        st.dataframe(
+                            pd.DataFrame(saved_lines),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    st.caption("This saved bill is also listed under EHR Demo Data → Bill History.")
+        if st.button(
+            "Generate Bill",
+            type="primary",
+            disabled=not can_generate_bill(
+                codes_for_bill,
+                services_confirmed_performed,
+                selected_payer in SUPPORTED_PAYER_OPTIONS,
+                already_generated_for_context,
+            ),
+            help=(
+                "This bill is already generated for the current encounter and code set."
+                if already_generated_for_context
+                else "Billing stays disabled until you confirm that the selected services were performed and documented."
+            ),
+        ):
             try:
                 bill = HealthcareApiClient().generate_patient_bill(
                     selected_patient_id,
-                    [str(item.get("ICD-10 Code", "")) for item in code_results.get("icd10", []) if item.get("ICD-10 Code")] if use_note_codes else [],
+                    icd10_codes_for_bill,
                     codes_for_bill,
                     encounter_id=encounter_id,
                     encounter_type=bill_encounter_type,
+                    payer_name=selected_payer,
                 )
                 st.session_state.generated_bill = bill
                 st.session_state.generated_bill_record_id = record.get("id")
                 st.session_state.generated_bill_patient_id = selected_patient_id
+                st.session_state.generated_bill_signature = current_bill_signature
+                st.session_state.bill_validation_signature = None
+                st.session_state.bill_validation_errors = None
                 st.rerun()
             except (RuntimeError, requests.exceptions.RequestException, ValueError) as error:
                 st.error(f"Bill generation failed: {error}")
+                warning = revenue_leakage_warning(error)
+                if warning:
+                    st.warning(warning)
     else:
         st.warning("Add an EHR patient before generating and saving a bill.")
 
@@ -1952,6 +2257,7 @@ def show_codes():
         and (
             st.session_state.generated_bill_record_id != record.get("id")
             or st.session_state.generated_bill_patient_id != selected_patient_id
+            or st.session_state.generated_bill_signature != current_bill_signature
             or bill.get("Patient_ID") != selected_patient_id
             or (encounter_id and bill.get("Encounter_ID") != encounter_id)
         )
@@ -1959,17 +2265,66 @@ def show_codes():
         st.session_state.generated_bill = None
         st.session_state.generated_bill_record_id = None
         st.session_state.generated_bill_patient_id = None
+        st.session_state.generated_bill_signature = None
+        st.session_state.bill_validation_signature = None
+        st.session_state.bill_validation_errors = None
         bill = None
+    validation_col, validation_message_col = st.columns([1, 5], vertical_alignment="center")
+    if validation_col.button(
+        "Validate Bill",
+        disabled=not bool(
+            bill
+            and not bill.get("Unpriced_Codes")
+            and selected_patient_id
+            and current_bill_signature
+        ),
+        key=f"validate_bill_{record.get('id', 'encounter')}_{selected_patient_id}",
+        help="Checks bill patient, encounter, payer, priced lines, and gross total. It does not submit a claim.",
+    ):
+        st.session_state.bill_validation_errors = validate_generated_bill(
+            bill,
+            selected_patient_id,
+            encounter_id,
+            selected_payer,
+        )
+        st.session_state.bill_validation_signature = current_bill_signature
+        st.rerun()
+    if st.session_state.bill_validation_signature == current_bill_signature:
+        validation_errors = st.session_state.bill_validation_errors or []
+        if validation_errors:
+            validation_message_col.error("Bill validation failed: " + " ".join(validation_errors))
+        elif bill:
+            validation_message_col.success(
+                f"Bill validated for {bill.get('Patient_Name') or selected_patient_id} "
+                f"with payer {bill.get('Payer_Name') or 'Not selected'}. "
+                "No claim was submitted."
+            )
     if bill and bill.get("Patient_ID") == selected_patient_id:
-        st.markdown('<div class="section-gap"></div><div class="section-title">Generated Hospital Bill</div><div class="section-subtitle">Services from this patient encounter priced against the original hospital chargemaster</div>', unsafe_allow_html=True)
-        bill_total = float(bill.get("Gross_Total_USD", 0))
-        total_col, name_col, account_col, encounter_col = st.columns(4)
-        total_col.metric("Total Gross Charges", f"${bill_total:,.2f}")
-        name_col.metric("Patient", bill.get("Patient_Name", "N/A"))
+        st.markdown('<div class="section-gap"></div><div class="section-title">Generated Hospital Bill</div><div class="section-subtitle">Gross charges and Athena estimated allowed amounts</div>', unsafe_allow_html=True)
+        if bill.get("Unpriced_Codes"):
+            st.error(
+                "This saved bill is incomplete and cannot be validated. The "
+                "following codes were omitted because no Athena rate exists: "
+                + ", ".join(str(code) for code in bill["Unpriced_Codes"])
+                + ". Generate a new bill after verified rates are added."
+            )
+        gross_total = float(bill.get("Gross_Total_USD", 0) or 0)
+        allowed_total = float(bill.get("Expected_Allowed_Total_USD", 0) or 0)
+        patient_total = float(bill.get("Patient_Responsibility_Total_USD", 0) or 0)
+        st.info(f"**Insurance payer for this bill:** {bill.get('Payer_Name') or 'Not selected'}")
+        total_col, allowed_col, patient_share_col, account_col = st.columns(4)
+        total_col.metric("Gross Charges", f"${gross_total:,.2f}")
+        allowed_col.metric(
+            "Expected Allowed",
+            f"${allowed_total:,.2f}" if bill.get("Payer_Name") else "Not calculated",
+        )
+        patient_share_col.metric(
+            "Estimated Patient Share",
+            f"${patient_total:,.2f}" if bill.get("Payer_Name") else "Not calculated",
+        )
         account_col.metric("Hospital Account", bill.get("Hospital_Account", "N/A"))
-        encounter_col.metric("EHR Encounter", bill.get("Encounter_ID", "N/A"))
         st.dataframe(pd.DataFrame(bill.get("Line_Items", [])), use_container_width=True, hide_index=True)
-        st.caption(f'{bill.get("Notice", "Gross charges only.")} {bill.get("Bill_Status", "Draft")} · Saved to the Epic demo JSON as {bill.get("Bill_ID", "")} for {bill.get("Patient_ID", "")} / {bill.get("Encounter_ID", "")} .')
+        st.caption(f'{bill.get("Notice", "Gross charges only.")} {bill.get("Bill_Status", "Draft")} · Saved to the selected EHR demo JSON as {bill.get("Bill_ID", "")} for {bill.get("Patient_ID", "")} / {bill.get("Encounter_ID", "")} .')
 # ============================================================
 # 9. ROUTER
 # ============================================================

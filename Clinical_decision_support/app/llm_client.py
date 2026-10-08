@@ -1,3 +1,5 @@
+import time
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -62,17 +64,32 @@ def _call_llm_with_config(prompt, system_prompt=None, temperature=0.3, api_key=N
     session.mount("https://", HTTPAdapter(max_retries=retry_policy))
     session.mount("http://", HTTPAdapter(max_retries=retry_policy))
 
-    try:
-        response = session.post(
-            clean_api_url,
-            headers=headers,
-            json=body,
-            timeout=(15, 120),
-        )
-    except requests.exceptions.RequestException as error:
-        raise ConnectionError(
-            "Unable to connect to the configured Coforge LLM service after retries."
-        ) from error
+    for attempt in range(2):
+        try:
+            response = session.post(
+                clean_api_url,
+                headers=headers,
+                json=body,
+                timeout=(15, 120),
+            )
+        except requests.exceptions.RequestException as error:
+            raise ConnectionError(
+                "Unable to connect to the configured Coforge LLM service after retries."
+            ) from error
+
+        if response.status_code == 400 and attempt == 0:
+            try:
+                error_detail = response.json().get("detail", "")
+            except (AttributeError, ValueError):
+                error_detail = ""
+            if (
+                isinstance(error_detail, str)
+                and "unexpected error occurred while generating the response"
+                in error_detail.lower()
+            ):
+                time.sleep(1)
+                continue
+        break
 
     if response.status_code != 200:
         raise RuntimeError(

@@ -61,6 +61,7 @@ class GenerateBillRequest(BaseModel):
     cpt_hcpcs_codes: list[str] = Field(default_factory=list)
     encounter_id: str | None = None
     encounter_type: Literal["Inpatient", "Outpatient"] = "Outpatient"
+    payer_name: Literal["Athena Health Insurance"] = "Athena Health Insurance"
 
 
 class EncounterRequest(BaseModel):

@@ -82,7 +82,7 @@ DOCUMENTATION_PROCEDURE_ALIASES = {
 
 _cpt_dataframe = None
 
-PROCEDURE_KEYWORDS = ("x ray", "x-ray", "scan", "surgery", "biopsy", "therapy", "injection", "procedure", "endoscopy", "ultrasound", "mri", "ct", "cbc", "a1c", "hba1c", "blood test", "office visit")
+PROCEDURE_KEYWORDS = ("x ray", "x-ray", "scan", "surgery", "biopsy", "therapy", "injection", "procedure", "endoscopy", "ultrasound", "mri", "ct", "cbc", "a1c", "hba1c", "blood test", "blood glucose", "blood sugar", "office visit")
 
 
 def classify_medical_item(item: Any) -> str | None:
