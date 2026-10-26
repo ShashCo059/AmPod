@@ -36,7 +36,7 @@ For sharing the medical coding functionality with an older Agent Pod version, se
 
 ## GitHub Setup
 
-```bash
+``bash
 git init
 git add .
 git commit -m "Initial project setup"
