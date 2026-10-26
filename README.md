@@ -8,7 +8,7 @@ This repository contains multiple related projects for ambient clinical document
 - `Clinical_decision_support/` — clinical decision support agent and knowledge-base workflow
 
 ## Getting Started
-
+<br>
 1. Create and activate a virtual environment:
    ```bash
    python -m venv .venv
